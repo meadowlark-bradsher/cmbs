@@ -177,6 +177,7 @@ termination_allowed = (
   evidence == successful
   AND exactly one posture admissible
   AND posture_stable
+  AND NOT repair_required
 )
 ```
 
@@ -186,20 +187,80 @@ termination_allowed = (
 
 ---
 
+### Mask F — Repair Obligation Mask
+
+Tracks whether the agent is obligated to fix a failed execution.
+
+```python
+repair_required = True | False
+```
+
+**Updated by**
+
+* Failed execution (kubectl apply, opa eval, ansible-playbook) → True
+* Successful execution → False
+
+**Rules**
+
+* When True, agent must remain in repair loop until execution succeeds or time expires
+* This is epistemic discipline, not competence — the agent must acknowledge failure
+
+**Used to gate**
+
+* Posture declaration (blocked while repair_required)
+* Termination (blocked while repair_required)
+* Degenerate re-execution detection
+
+---
+
+### Mask G — Capability Mask
+
+Tracks what generative and observational actions have occurred. Enforces action preconditions.
+
+```python
+capability_mask = {
+  "policy_written": True | False,
+  "script_written": True | False,
+  "playbook_written": True | False,
+  "policy_observed": True | False
+}
+```
+
+**Updated by**
+
+* `generate_policy`, `revise_artifact`, `edit_policy` → policy_written = True
+* `generate_script` → script_written = True
+* `generate_playbook` → playbook_written = True
+* `read_resource` (for policies) → policy_observed = True
+
+**Rules**
+
+* Prevents "phantom action" failures where agents believe they wrote artifacts that were never created
+* Derivation obligation: `edit_policy` requires prior observation of existing state
+
+**Used to gate**
+
+* `execute_kubectl`, `execute_opa` → requires policy_written
+* `execute_script` → requires script_written
+* `execute_ansible` → requires playbook_written
+* `edit_policy` → requires policy_observed
+
+---
+
 ## 4. Masks Mapped to Task Phases
 
-| Phase            | Relevant Masks         | What Is Enforced            |
-| ---------------- | ---------------------- | --------------------------- |
-| Read goal        | Affordance             | No assumptions yet          |
-| Select path      | Affordance             | Tentative only              |
-| Attempt artifact | Affordance, Evidence   | Must attempt before claims  |
-| Observe error    | Evidence               | Errors do not imply success |
-| Update belief    | All                    | Monotonic updates           |
-| Retry            | Affordance, Evidence   | Retry allowed               |
-| Apply            | Affordance             | Must succeed                |
-| Verify           | Evidence, Posture      | Must observe output         |
-| Declare posture  | Posture                | Must be admissible          |
-| Terminate        | Stability, Termination | Must be earned              |
+| Phase            | Relevant Masks                    | What Is Enforced                    |
+| ---------------- | --------------------------------- | ----------------------------------- |
+| Read goal        | Affordance                        | No assumptions yet                  |
+| Select path      | Affordance                        | Tentative only                      |
+| Attempt artifact | Affordance, Evidence, Capability  | Must attempt before claims          |
+| Observe error    | Evidence, Repair                  | Errors trigger repair obligation    |
+| Update belief    | All                               | Monotonic updates                   |
+| Retry            | Affordance, Evidence, Repair      | Retry required while repair pending |
+| Apply            | Affordance, Capability            | Must have written artifact first    |
+| Verify           | Evidence, Posture                 | Must observe output                 |
+| Declare posture  | Posture, Repair                   | Must be admissible, no repair pending |
+| Terminate        | Stability, Termination, Repair    | Must be earned, no repair pending   |
 
 ---
 
