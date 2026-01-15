@@ -1,0 +1,45 @@
+# CMBS Agent Docker Image for Local Testing
+#
+# This is a standalone Dockerfile for testing without ITBench base image.
+#
+# Build:
+#   docker build -f Dockerfile.local -t cmbs-agent-local:latest .
+#
+# Run:
+#   docker run --rm -it --network host \
+#       -v $(pwd)/test_scenario_data.json:/tmp/agent/scenario_data.json \
+#       -v $(pwd)/output:/tmp/agent/output \
+#       cmbs-agent-local:latest \
+#       python -m cmbs.itbench_harness \
+#           --scenario-data /tmp/agent/scenario_data.json \
+#           --output-dir /tmp/agent/output \
+#           -v
+
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt update -y && apt install -y \
+    curl \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install kubectl
+RUN curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl" && \
+    chmod +x ./kubectl && \
+    mv ./kubectl /usr/local/bin/kubectl
+
+# Copy CMBS source
+COPY cmbs /app/cmbs
+
+# Install Python dependencies
+WORKDIR /app
+RUN pip install --no-cache-dir \
+    ollama \
+    pydantic
+
+# Create agent working directory
+RUN mkdir -p /tmp/agent
+
+ENV PYTHONPATH=/app
+
+CMD ["python", "-m", "cmbs.itbench_harness", "--help"]
