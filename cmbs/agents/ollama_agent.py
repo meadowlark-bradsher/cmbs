@@ -95,16 +95,6 @@ CRITICAL RULES:
 4. READ THE ERROR MESSAGE CAREFULLY - it tells you what's wrong
 5. After applying a policy successfully, check policy reports to see violations
 
-For Kyverno ClusterPolicy, the required structure is:
-- apiVersion: kyverno.io/v1
-- kind: ClusterPolicy
-- metadata.name: required
-- spec.validationFailureAction: Audit
-- spec.rules[].name: required
-- spec.rules[].match.any[].resources.kinds: ["Pod"]
-- spec.rules[].validate.message: required
-- spec.rules[].validate.pattern: the pattern to match
-
 RESPOND WITH ONLY VALID JSON. NO MARKDOWN CODE BLOCKS."""
 
 
