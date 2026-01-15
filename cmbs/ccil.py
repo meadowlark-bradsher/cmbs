@@ -591,13 +591,123 @@ class CCILEngine:
         energy_trace = [m.mean_energy for m in self.metrics_history]
         progress_trace = [m.progress_score for m in self.metrics_history]
 
+        # Compute diagnosis
+        diagnosis = self._diagnose_patterns(h_posture_trace, progress_trace)
+
         return {
             "num_steps": len(self.metrics_history),
             "final_entropy_afford": h_afford_trace[-1] if h_afford_trace else 0,
             "final_entropy_posture": h_posture_trace[-1] if h_posture_trace else 0,
             "final_progress_score": progress_trace[-1] if progress_trace else 0,
+            "diagnosis": diagnosis,
             "entropy_afford_trace": h_afford_trace,
             "entropy_posture_trace": h_posture_trace,
             "energy_trace": energy_trace,
             "progress_trace": progress_trace,
+        }
+
+    def _diagnose_patterns(
+        self,
+        entropy_trace: List[float],
+        progress_trace: List[float],
+    ) -> dict:
+        """
+        Diagnose execution patterns from CCIL traces.
+
+        Pattern interpretations:
+        | Pattern                      | Interpretation                                |
+        | ---------------------------- | --------------------------------------------- |
+        | High entropy + low progress  | agent is flailing                             |
+        | High entropy + high progress | agent is executing without learning           |
+        | Low entropy + low progress   | suspicious collapse (potential hallucination) |
+        | Low entropy + high progress  | ideal convergence                             |
+        | Progress ↑ but entropy flat  | observability gap                             |
+        | Entropy ↓ before evidence    | epistemic violation                           |
+        """
+        if len(entropy_trace) < 2 or len(progress_trace) < 2:
+            return {"pattern": "insufficient_data", "interpretation": "Not enough steps to diagnose"}
+
+        # Thresholds
+        HIGH_ENTROPY = 0.8
+        LOW_ENTROPY = 0.3
+        HIGH_PROGRESS = 0.7
+        LOW_PROGRESS = 0.3
+        ENTROPY_CHANGE_THRESHOLD = 0.1
+        PROGRESS_CHANGE_THRESHOLD = 0.2
+
+        # Final values
+        final_entropy = entropy_trace[-1]
+        final_progress = progress_trace[-1]
+        initial_entropy = entropy_trace[0]
+        initial_progress = progress_trace[0]
+
+        # Compute changes
+        entropy_delta = initial_entropy - final_entropy  # Positive = entropy decreased
+        progress_delta = final_progress - initial_progress  # Positive = progress increased
+
+        # Check for entropy collapse before evidence
+        early_entropy_collapse = False
+        for i in range(min(3, len(entropy_trace))):
+            if entropy_trace[i] < LOW_ENTROPY and progress_trace[i] < LOW_PROGRESS:
+                early_entropy_collapse = True
+                break
+
+        # Check for flat entropy despite progress
+        entropy_flat = abs(entropy_delta) < ENTROPY_CHANGE_THRESHOLD
+        progress_increased = progress_delta > PROGRESS_CHANGE_THRESHOLD
+
+        # Determine pattern
+        patterns = []
+        interpretations = []
+
+        if early_entropy_collapse:
+            patterns.append("entropy_collapse_before_evidence")
+            interpretations.append("Epistemic violation: certainty before evidence")
+
+        if final_entropy > HIGH_ENTROPY and final_progress < LOW_PROGRESS:
+            patterns.append("high_entropy_low_progress")
+            interpretations.append("Agent is flailing: no progress, no learning")
+
+        if final_entropy > HIGH_ENTROPY and final_progress > HIGH_PROGRESS:
+            patterns.append("high_entropy_high_progress")
+            interpretations.append("Executing without learning: progress but no belief update")
+
+        if final_entropy < LOW_ENTROPY and final_progress < LOW_PROGRESS:
+            patterns.append("low_entropy_low_progress")
+            interpretations.append("Suspicious collapse: certainty without evidence (hallucination risk)")
+
+        if final_entropy < LOW_ENTROPY and final_progress > HIGH_PROGRESS:
+            patterns.append("low_entropy_high_progress")
+            interpretations.append("Ideal convergence: beliefs resolved with evidence")
+
+        if entropy_flat and progress_increased:
+            patterns.append("observability_gap")
+            interpretations.append("Progress without belief update: missing verification step")
+
+        # If no specific pattern, describe the state
+        if not patterns:
+            if final_entropy > 0.5:
+                entropy_desc = "uncertain"
+            else:
+                entropy_desc = "resolved"
+
+            if final_progress > 0.5:
+                progress_desc = "progressing"
+            else:
+                progress_desc = "stalled"
+
+            patterns.append(f"{entropy_desc}_{progress_desc}")
+            interpretations.append(f"Beliefs {entropy_desc}, execution {progress_desc}")
+
+        return {
+            "patterns": patterns,
+            "interpretations": interpretations,
+            "primary_pattern": patterns[0] if patterns else "unknown",
+            "primary_interpretation": interpretations[0] if interpretations else "Unknown state",
+            "metrics": {
+                "final_entropy": round(final_entropy, 3),
+                "final_progress": round(final_progress, 3),
+                "entropy_delta": round(entropy_delta, 3),
+                "progress_delta": round(progress_delta, 3),
+            },
         }
