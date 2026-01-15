@@ -39,6 +39,7 @@ from .agent_protocol import (
     SUPERVISOR_MESSAGES,
 )
 from .observer import Observer
+from .ccil import CCILConfig, CCILEngine, ObservationEvent, AuditMetrics
 
 
 class Verdict(str, Enum):
@@ -79,6 +80,7 @@ class Supervisor:
         max_steps: int = 50,
         timeout_seconds: float = 200.0,
         degeneracy_threshold: int = 3,  # Block after N identical failures
+        ccil_config: Optional[CCILConfig] = None,  # EXPERIMENTAL: Continuous inference layer
     ):
         self.observer = observer
         self.masks = Masks()
@@ -98,6 +100,15 @@ class Supervisor:
         self.revision_threshold = 2  # Lower than execution (revise should change something)
         self.last_revision_checksum: dict[str, str] = {}  # path -> checksum
         self.revision_repeat_count: dict[str, int] = {}   # path -> count
+
+        # EXPERIMENTAL: Continuous CMBS Inference Layer
+        # When enabled, maintains continuous posterior for diachronic audits
+        # Does NOT affect gating decisions - purely diagnostic
+        self.ccil_config = ccil_config or CCILConfig(enabled=False)
+        self.ccil_engine: Optional[CCILEngine] = None
+        if self.ccil_config.enabled:
+            self.ccil_engine = CCILEngine(self.ccil_config)
+        self.last_ccil_metrics: Optional[AuditMetrics] = None
 
     def elapsed_time(self) -> float:
         """Time elapsed since supervisor started."""
@@ -377,12 +388,44 @@ class Supervisor:
 
     def get_status(self) -> dict:
         """Get current supervisor status for debugging/logging."""
-        return {
+        status = {
             "step_count": self.step_count,
             "elapsed_time": self.elapsed_time(),
             "time_remaining": self.time_remaining(),
             "masks": self.masks.to_dict(),
         }
+        if self.ccil_engine and self.last_ccil_metrics:
+            status["ccil"] = self.last_ccil_metrics.to_dict()
+        return status
+
+    def update_ccil(self, observation) -> Optional[AuditMetrics]:
+        """
+        Update CCIL with an observation (EXPERIMENTAL).
+
+        Called by the runner after each execution.
+        Returns audit metrics if CCIL is enabled, None otherwise.
+
+        NOTE: This is purely diagnostic - does not affect gating.
+        """
+        if not self.ccil_engine:
+            return None
+
+        obs_event = ObservationEvent.from_observation(self.step_count, observation)
+        metrics = self.ccil_engine.update(obs_event)
+        self.last_ccil_metrics = metrics
+        return metrics
+
+    def get_ccil_summary(self) -> Optional[dict]:
+        """Get CCIL summary for the episode (if enabled)."""
+        if not self.ccil_engine:
+            return None
+        return self.ccil_engine.get_summary()
+
+    def get_ccil_history(self) -> Optional[list]:
+        """Get full CCIL metrics history (if enabled)."""
+        if not self.ccil_engine:
+            return None
+        return self.ccil_engine.get_metrics_history()
 
     def __str__(self) -> str:
         return (

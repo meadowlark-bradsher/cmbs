@@ -27,6 +27,7 @@ from .masks import Masks
 from .supervisor import Supervisor, Verdict
 from .observer import Observer
 from .agent_protocol import AgentStep, AgentBelief, AgentAction, ActionType
+from .ccil import CCILConfig
 
 
 @dataclass
@@ -117,6 +118,8 @@ class CMBSRunner:
         verbose: bool = True,
         log_dir: str = "/tmp/cmbs-logs",
         run_id: Optional[str] = None,
+        ccil_enabled: bool = False,  # EXPERIMENTAL: Enable continuous inference layer
+        ccil_config: Optional[CCILConfig] = None,
     ):
         self.agent = agent
         self.work_dir = work_dir
@@ -133,12 +136,21 @@ class CMBSRunner:
         os.makedirs(work_dir, exist_ok=True)
         os.makedirs(self.run_log_dir, exist_ok=True)
 
+        # EXPERIMENTAL: Continuous CMBS Inference Layer
+        if ccil_config:
+            self.ccil_config = ccil_config
+        elif ccil_enabled:
+            self.ccil_config = CCILConfig(enabled=True)
+        else:
+            self.ccil_config = CCILConfig(enabled=False)
+
         # Create components
         self.observer = Observer(work_dir)
         self.supervisor = Supervisor(
             observer=self.observer,
             max_steps=max_steps,
             timeout_seconds=timeout_seconds,
+            ccil_config=self.ccil_config,
         )
 
         # Trace for debugging
@@ -316,6 +328,14 @@ class CMBSRunner:
         elif action.type in (ActionType.RETRY, ActionType.CONTINUE):
             self.log(f"Agent continuing...")
 
+        # EXPERIMENTAL: Update CCIL with observation (if enabled)
+        # This is purely diagnostic - does not affect gating
+        if self.ccil_config.enabled and self.observer.last_observation:
+            ccil_metrics = self.supervisor.update_ccil(self.observer.last_observation)
+            if ccil_metrics and self.verbose:
+                self.log(f"  [CCIL] entropy_posture={ccil_metrics.h_posture:.3f}, "
+                        f"progress={ccil_metrics.progress_score:.3f}")
+
         return observation
 
     def run(self, goal: str) -> RunResult:
@@ -450,6 +470,21 @@ class CMBSRunner:
             with open(history_path, "w") as f:
                 json.dump(self.agent.conversation_history, f, indent=2)
 
+        # EXPERIMENTAL: Save CCIL data if enabled
+        if self.ccil_config.enabled:
+            ccil_summary = self.supervisor.get_ccil_summary()
+            if ccil_summary:
+                ccil_summary_path = os.path.join(self.run_log_dir, "ccil_summary.json")
+                with open(ccil_summary_path, "w") as f:
+                    json.dump(ccil_summary, f, indent=2)
+
+            if self.ccil_config.log_level == "full":
+                ccil_history = self.supervisor.get_ccil_history()
+                if ccil_history:
+                    ccil_history_path = os.path.join(self.run_log_dir, "ccil_history.json")
+                    with open(ccil_history_path, "w") as f:
+                        json.dump(ccil_history, f, indent=2)
+
         # Copy artifacts from work_dir to log_dir
         artifacts_dir = os.path.join(self.run_log_dir, "artifacts")
         os.makedirs(artifacts_dir, exist_ok=True)
@@ -471,6 +506,10 @@ class CMBSRunner:
             self._write_log(f"  - final_masks.json: final mask state")
             self._write_log(f"  - conversation_history.json: agent LLM conversation")
             self._write_log(f"  - artifacts/: generated artifacts")
+            if self.ccil_config.enabled:
+                self._write_log(f"  - ccil_summary.json: CCIL diachronic audit summary (EXPERIMENTAL)")
+                if self.ccil_config.log_level == "full":
+                    self._write_log(f"  - ccil_history.json: CCIL per-step metrics (EXPERIMENTAL)")
             self.log_file.close()
             self.log_file = None
 
