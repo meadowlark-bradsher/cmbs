@@ -15,11 +15,47 @@ This is by design - CMBS enforces epistemic discipline, not competence.
 
 import json
 import re
-from typing import Optional
+from typing import Optional, Literal, Dict, Any
 import ollama
+from pydantic import BaseModel, Field
 
 from ..runner import AgentInterface
 from ..agent_protocol import AgentStep, AgentBelief, AgentAction, ActionType
+
+
+# Pydantic models for structured output
+class AffordancesSchema(BaseModel):
+    k8s_policy: Literal["unknown", "available", "unavailable"] = "unknown"
+    opa_eval: Literal["unknown", "available", "unavailable"] = "unknown"
+    ansible_exec: Literal["unknown", "available", "unavailable"] = "unknown"
+
+
+class BeliefSchema(BaseModel):
+    affordances: AffordancesSchema = Field(default_factory=AffordancesSchema)
+    posture: Literal["unknown", "compliant", "non_compliant"] = "unknown"
+    evidence: Literal["none", "attempted", "successful"] = "none"
+
+
+class ActionPayloadSchema(BaseModel):
+    content: Optional[str] = None
+    path: Optional[str] = None
+    command: Optional[str] = None
+    posture: Optional[Literal["compliant", "non_compliant"]] = None
+
+
+class ActionSchema(BaseModel):
+    type: Literal[
+        "generate_policy", "revise_artifact", "execute_kubectl",
+        "check_status", "declare_posture", "terminate", "continue"
+    ]
+    payload: ActionPayloadSchema = Field(default_factory=ActionPayloadSchema)
+
+
+class AgentResponseSchema(BaseModel):
+    """Schema for structured agent responses - enforced by Ollama."""
+    belief: BeliefSchema = Field(default_factory=BeliefSchema)
+    action: ActionSchema
+    free_text: str = ""
 
 
 # System prompt that explains the protocol to the LLM
@@ -102,34 +138,38 @@ class OllamaAgent(AgentInterface):
     def _parse_response(self, response_text: str) -> Optional[dict]:
         """
         Parse LLM response into a dictionary.
+        With structured output enabled, Ollama should return valid JSON.
+        We also validate against Pydantic schema for extra safety.
         Returns None if parsing fails.
         """
         text = response_text.strip()
 
-        # Remove markdown code blocks if present
+        # Remove markdown code blocks if present (shouldn't happen with structured output)
         if "```" in text:
-            # Extract content between code blocks
             match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
             if match:
                 text = match.group(1).strip()
             else:
-                # Try removing just the markers
                 text = re.sub(r'```(?:json)?', '', text).strip()
 
         # Try direct JSON parse
         try:
-            return json.loads(text)
+            data = json.loads(text)
+            # Validate against Pydantic schema
+            validated = AgentResponseSchema.model_validate(data)
+            return validated.model_dump()
         except json.JSONDecodeError as e:
-            print(f"[OllamaAgent] Direct parse failed: {e}")
+            print(f"[OllamaAgent] JSON parse failed: {e}")
             print(f"[OllamaAgent] Text starts with: {repr(text[:100])}")
-            # Show context around the error position
-            pos = e.pos
-            start = max(0, pos - 60)
-            end = min(len(text), pos + 60)
-            print(f"[OllamaAgent] Error context at pos {pos}:")
-            print(f"[OllamaAgent]   {repr(text[start:end])}")
+        except Exception as e:
+            print(f"[OllamaAgent] Pydantic validation failed: {e}")
+            # Still return raw parsed JSON if Pydantic fails but JSON is valid
+            try:
+                return json.loads(text)
+            except:
+                pass
 
-        # Try to find JSON object in the text
+        # Fallback: Try to find JSON object in the text
         match = re.search(r'\{[\s\S]*\}', text)
         if match:
             try:
@@ -204,14 +244,17 @@ class OllamaAgent(AgentInterface):
         })
 
         # Call Ollama with chat API for multi-turn conversation
+        # Use format="json" to enforce JSON output (Ollama 0.3.x)
+        # Pydantic validation is done in _parse_response
         try:
             messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.conversation_history
             response = ollama.chat(
                 model=self.model,
                 messages=messages,
+                format="json",
                 options={
                     "temperature": self.temperature,
-                    "num_predict": 1500,
+                    "num_predict": 2000,
                 },
             )
             # ChatResponse is an object, not a dict
@@ -282,10 +325,20 @@ class OllamaAgent(AgentInterface):
                 }
                 action_type = type_mapping.get(action_type_str.lower(), ActionType.CONTINUE)
 
+            # Get payload, handling Pydantic model output (with None values)
+            raw_payload = action_data.get("payload", {})
+            # Filter out None values from Pydantic output
+            payload = {k: v for k, v in raw_payload.items() if v is not None}
+
             action = AgentAction(
                 type=action_type,
-                payload=action_data.get("payload", {}),
+                payload=payload,
             )
+
+            # Fix: If declare_posture but posture not in payload, infer from belief
+            if action_type == ActionType.DECLARE_POSTURE and "posture" not in payload:
+                if belief.posture in ("compliant", "non_compliant"):
+                    action.payload["posture"] = belief.posture
 
             # Track action type for loop detection
             self.last_action_type = action_type_str
