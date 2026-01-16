@@ -148,17 +148,28 @@ class LatentBelief:
         }
 
 
+class ObservationSource(str, Enum):
+    """Source type for observations."""
+    EXECUTION = "execution"
+    DOCUMENT_PROBE = "document_probe"
+    REVIEW_PROBE = "review_probe"
+
+
 @dataclass
 class ObservationEvent:
     """
-    Structured observation from execution.
+    Structured observation from execution or epistemic probes.
 
     This is the input to the inference engine, derived from the same
     signals used for discrete mask updates.
 
-    Also supports document probes (DSRO feature).
+    Supports three source types:
+    - execution: command execution results
+    - document_probe: DSRO document searches
+    - review_probe: RO self-review actions (diffs, logs, revisions)
     """
     step: int
+    source: ObservationSource = ObservationSource.EXECUTION
     command: Optional[str] = None
     command_success: Optional[bool] = None
     artifact_written: bool = False
@@ -171,6 +182,12 @@ class ObservationEvent:
     probe_target: Optional[str] = None
     probe_found: bool = False
     probe_text_length: int = 0
+
+    # Review probe fields (RO)
+    is_review_probe: bool = False
+    review_kind: Optional[str] = None  # "diff", "log", "revision_compare"
+    revealed_contradiction: bool = False
+    reconciled_revision: bool = False
 
     @classmethod
     def from_document_probe(
@@ -196,6 +213,7 @@ class ObservationEvent:
 
         return cls(
             step=step,
+            source=ObservationSource.DOCUMENT_PROBE,
             is_document_probe=True,
             probe_kind=kind,
             probe_target=target,
@@ -203,6 +221,42 @@ class ObservationEvent:
             probe_text_length=text_length,
             output_tags=tags,
             command_success=found,  # Treat found as success for CCIL
+        )
+
+    @classmethod
+    def from_review_probe(
+        cls,
+        step: int,
+        kind: str,
+        revealed_contradiction: bool = False,
+        reconciled_revision: bool = False,
+    ) -> "ObservationEvent":
+        """
+        Create from a review probe result.
+
+        Used by RO (Review Obligation) to track self-review actions.
+
+        Args:
+            step: Current step index
+            kind: Type of review ("diff", "log", "revision_compare")
+            revealed_contradiction: Whether the review revealed a contradiction
+            reconciled_revision: Whether the review led to reconciling revisions
+        """
+        tags = ["review_probe", f"review_{kind}"]
+        if revealed_contradiction:
+            tags.append("contradiction_revealed")
+        if reconciled_revision:
+            tags.append("revision_reconciled")
+
+        return cls(
+            step=step,
+            source=ObservationSource.REVIEW_PROBE,
+            is_review_probe=True,
+            review_kind=kind,
+            revealed_contradiction=revealed_contradiction,
+            reconciled_revision=reconciled_revision,
+            output_tags=tags,
+            command_success=True,  # Review probes are informational, always "succeed"
         )
 
     @classmethod
@@ -261,6 +315,39 @@ class ObservationEvent:
 
 
 @dataclass
+class BeliefDelta:
+    """
+    Tracks belief change for obligation exit conditions.
+
+    Used by DSRO and RO to determine if belief has moved enough to exit.
+    Exit is allowed if ANY of the deltas exceeds the threshold.
+    """
+    entropy_drop: float = 0.0      # H_posture(entry) - H_posture(now)
+    capability_gain: float = 0.0   # capability_opa(now) - capability_opa(entry)
+    repair_pressure_drop: float = 0.0  # repair_pressure(entry) - repair_pressure(now)
+
+    def belief_moved(self, threshold: float = 0.05) -> bool:
+        """
+        Check if belief has moved enough to exit an obligation.
+
+        Returns True if ANY of the deltas exceeds the threshold.
+        """
+        return (
+            self.entropy_drop >= threshold or
+            self.capability_gain >= threshold or
+            self.repair_pressure_drop >= threshold
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "entropy_drop": self.entropy_drop,
+            "capability_gain": self.capability_gain,
+            "repair_pressure_drop": self.repair_pressure_drop,
+            "belief_moved": self.belief_moved(),
+        }
+
+
+@dataclass
 class AuditMetrics:
     """
     Diachronic audit outputs computed from the continuous posterior.
@@ -274,6 +361,7 @@ class AuditMetrics:
     - Trajectory metrics (oscillation, convergence)
     - Repair pressure (stuck in repair loop?)
     - Capability confidence (robust or fragile success?)
+    - Belief delta (for obligation exit conditions)
     """
     step: int
 
@@ -311,8 +399,12 @@ class AuditMetrics:
     p_compliant: float = 0.5
     p_non_compliant: float = 0.5
 
+    # Belief delta for obligation exit (DSRO/RO)
+    # Computed relative to obligation entry point
+    belief_delta: Optional[BeliefDelta] = None
+
     def to_dict(self) -> dict:
-        return {
+        result = {
             "step": self.step,
             "entropy": {
                 "affordance": self.h_afford,
@@ -343,6 +435,9 @@ class AuditMetrics:
                 "non_compliant": self.p_non_compliant,
             },
         }
+        if self.belief_delta:
+            result["belief_delta"] = self.belief_delta.to_dict()
+        return result
 
 
 # ============================================================================
@@ -524,6 +619,37 @@ class EnergyFunction:
                 # Probe didn't find content - slight increase in pressure
                 # (exhausting search space without learning)
                 energy += 0.2 * sigmoid(-z_repair_pressure)
+
+        # --- Review probe signals (RO) ---
+        # Review probes introduce self-consistency constraints
+        # Inspecting diffs/logs decreases oscillation and repair pressure
+        # Contradictions temporarily increase entropy (allowed)
+        # Reconciling revisions increases capability
+
+        if "review_probe" in obs.output_tags:
+            # Any review decreases repair pressure (active troubleshooting)
+            energy += 0.4 * sigmoid(z_repair_pressure)  # decrease repair pressure
+
+            if "contradiction_revealed" in obs.output_tags:
+                # Contradiction revealed: temporarily increase entropy
+                # This is allowed - honest uncertainty is better than false confidence
+                # Slight push toward uncertainty in posture
+                energy += 0.3 * sigmoid(-z_compliant)  # less confident in compliant
+                energy += 0.3 * sigmoid(-z_non_compliant)  # less confident in non_compliant
+
+            if "revision_reconciled" in obs.output_tags:
+                # Reconciled revisions: increase capability
+                # Agent successfully integrated past attempts
+                energy += 1.0 * sigmoid(-z_cap_opa)  # increase capability
+                energy += 0.5 * sigmoid(-z_cap_k8s)  # may help k8s too
+
+            # Review type-specific effects
+            if "review_diff" in obs.output_tags:
+                # Diff review: helps identify oscillation
+                energy += 0.3 * sigmoid(z_repair_pressure)  # reduce pressure
+            if "review_log" in obs.output_tags:
+                # Log review: helps understand failure patterns
+                energy += 0.3 * sigmoid(z_repair_pressure)  # reduce pressure
 
         return energy
 
