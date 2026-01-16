@@ -1,12 +1,14 @@
 """
 CMBS Belief Masks
 
-The six masks that track observable execution state:
+The seven masks that track observable execution state:
 - Affordance: what execution paths are possible
 - Evidence: how far execution has progressed
 - Posture: which outcomes are still admissible
 - Stability: whether beliefs are oscillating
 - Repair: whether agent is obligated to fix a failed execution
+- Capability: what generative actions have occurred
+- DSO: Document Search Obligation state (DSRO feature)
 - Termination: derived eligibility to terminate
 
 These masks are updated ONLY from observed execution outcomes.
@@ -15,11 +17,15 @@ They never encode domain knowledge or schemas.
 Repair obligation: When an execution attempt fails, the agent is
 required to remain in a repair loop until execution succeeds or
 time expires. This is epistemic discipline, not competence.
+
+Document Search Obligation (DSRO): When the agent chooses document
+search as a repair action, they enter DSO and must demonstrate
+measurable learning (via CCIL metrics) before exiting.
 """
 
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, List, Tuple, Optional
 
 
 class AffordanceState(str, Enum):
@@ -190,6 +196,114 @@ class StabilityMask:
 
 
 @dataclass
+class DSOMask:
+    """
+    Mask H - Document Search Obligation state (DSRO feature).
+
+    Tracks whether the agent is in the Document Search Obligation state
+    and enforces the non-repetition rule.
+
+    Entry: Agent selects DOCUMENT_SEARCH as repair action
+    Exit: CCIL metrics show measurable belief change OR all probes exhausted
+
+    Design invariant:
+    "Choosing document search creates an obligation to learn.
+     Learning is measured by belief movement, not by claims."
+    """
+    # Whether DSO is currently active
+    active: bool = False
+
+    # Probe history for non-repetition rule: [(kind, target), ...]
+    probe_history: List[Tuple[str, str]] = field(default_factory=list)
+
+    # CCIL metrics at DSO entry (for measuring change)
+    entry_entropy_posture: Optional[float] = None
+    entry_capability_opa: Optional[float] = None
+    entry_repair_pressure: Optional[float] = None
+
+    # Exit thresholds (belief change required to exit)
+    delta_threshold: float = 0.05  # Minimum change in any metric
+
+    # Exit reason (set when DSO ends)
+    exit_reason: Optional[str] = None  # "belief_change" | "exhausted" | "timeout"
+
+    def enter(
+        self,
+        entropy_posture: float,
+        capability_opa: float,
+        repair_pressure: float,
+    ) -> None:
+        """Enter DSO state, recording entry metrics."""
+        self.active = True
+        self.probe_history = []
+        self.entry_entropy_posture = entropy_posture
+        self.entry_capability_opa = capability_opa
+        self.entry_repair_pressure = repair_pressure
+        self.exit_reason = None
+
+    def exit(self, reason: str) -> None:
+        """Exit DSO state with given reason."""
+        self.active = False
+        self.exit_reason = reason
+
+    def record_probe(self, kind: str, target: str) -> None:
+        """Record a probe in history."""
+        self.probe_history.append((kind, target))
+
+    def is_probe_repeated(self, kind: str, target: str) -> bool:
+        """Check if this probe has been made before."""
+        return (kind, target) in self.probe_history
+
+    def get_probe_count(self) -> int:
+        """Return number of probes made."""
+        return len(self.probe_history)
+
+    def can_exit_with_belief_change(
+        self,
+        current_entropy_posture: float,
+        current_capability_opa: float,
+        current_repair_pressure: float,
+    ) -> bool:
+        """
+        Check if CCIL metrics show sufficient change to exit DSO.
+
+        Exit is allowed if ANY of:
+        - entropy_posture decreased >= delta_threshold
+        - capability_opa increased >= delta_threshold
+        - repair_pressure decreased >= delta_threshold
+        """
+        if not self.active:
+            return True  # Not in DSO, can always exit
+
+        if self.entry_entropy_posture is None:
+            return False  # No entry metrics recorded
+
+        # Check each exit condition
+        entropy_decrease = self.entry_entropy_posture - current_entropy_posture
+        capability_increase = current_capability_opa - self.entry_capability_opa
+        pressure_decrease = self.entry_repair_pressure - current_repair_pressure
+
+        return (
+            entropy_decrease >= self.delta_threshold or
+            capability_increase >= self.delta_threshold or
+            pressure_decrease >= self.delta_threshold
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "active": self.active,
+            "probe_count": len(self.probe_history),
+            "probe_history": self.probe_history,
+            "entry_metrics": {
+                "entropy_posture": self.entry_entropy_posture,
+                "capability_opa": self.entry_capability_opa,
+                "repair_pressure": self.entry_repair_pressure,
+            } if self.active else None,
+            "exit_reason": self.exit_reason,
+        }
+
+
+@dataclass
 class Masks:
     """
     Complete mask state for the CMBS supervisor.
@@ -202,6 +316,7 @@ class Masks:
     posture: PostureMask = field(default_factory=PostureMask)
     stability: StabilityMask = field(default_factory=StabilityMask)
     capability: CapabilityMask = field(default_factory=CapabilityMask)
+    dso: DSOMask = field(default_factory=DSOMask)
 
     # Mask F - Repair/troubleshooting obligation
     # When True, agent must continue repair loop until success
@@ -233,11 +348,13 @@ class Masks:
             "posture": self.posture.to_dict(),
             "stability": self.stability.to_dict(),
             "capability": self.capability.to_dict(),
+            "dso": self.dso.to_dict(),
             "repair_required": self.repair_required,
             "termination_allowed": self.termination_allowed(),
         }
 
     def __str__(self) -> str:
+        dso_status = f"active={self.dso.active}, probes={self.dso.get_probe_count()}" if self.dso.active else "inactive"
         return (
             f"Masks(\n"
             f"  affordance: k8s={self.affordance.k8s_policy.value}, "
@@ -248,6 +365,7 @@ class Masks:
             f"non_compliant={self.posture.non_compliant}\n"
             f"  stability: stable={self.stability.is_stable()}\n"
             f"  repair_required: {self.repair_required}\n"
+            f"  dso: {dso_status}\n"
             f"  termination_allowed: {self.termination_allowed()}\n"
             f")"
         )

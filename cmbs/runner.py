@@ -28,6 +28,7 @@ from .supervisor import Supervisor, Verdict
 from .observer import Observer
 from .agent_protocol import AgentStep, AgentBelief, AgentAction, ActionType
 from .ccil import CCILConfig
+from .document_oracle import DocumentOracle, load_document
 
 
 @dataclass
@@ -120,6 +121,8 @@ class CMBSRunner:
         run_id: Optional[str] = None,
         ccil_enabled: bool = False,  # EXPERIMENTAL: Enable continuous inference layer
         ccil_config: Optional[CCILConfig] = None,
+        document_oracle: Optional[DocumentOracle] = None,  # DSRO: Document oracle for repair
+        document_path: Optional[str] = None,  # DSRO: Path to load document from
     ):
         self.agent = agent
         self.work_dir = work_dir
@@ -143,6 +146,14 @@ class CMBSRunner:
             self.ccil_config = CCILConfig(enabled=True)
         else:
             self.ccil_config = CCILConfig(enabled=False)
+
+        # DSRO: Document Search as Repair Obligation
+        if document_oracle:
+            self.document_oracle = document_oracle
+        elif document_path:
+            self.document_oracle = load_document(document_path)
+        else:
+            self.document_oracle = None
 
         # Create components
         self.observer = Observer(work_dir)
@@ -328,6 +339,87 @@ class CMBSRunner:
         elif action.type in (ActionType.RETRY, ActionType.CONTINUE):
             self.log(f"Agent continuing...")
 
+        # =========================================================
+        # DSRO: Document Search Obligation Actions
+        # =========================================================
+
+        elif action.type == ActionType.DOCUMENT_SEARCH:
+            # Enter Document Search Obligation state
+            self.supervisor.enter_dso()
+            self.log("Entered Document Search Obligation (DSO)")
+            observation["dso_entered"] = True
+            observation["available_sections"] = (
+                self.document_oracle.get_available_sections()
+                if self.document_oracle else []
+            )
+            observation["available_keywords"] = (
+                self.document_oracle.get_available_keywords()[:20]  # Sample
+                if self.document_oracle else []
+            )
+
+        elif action.type == ActionType.PROBE_DOCUMENT:
+            kind = action.payload.get("kind", "")
+            target = action.payload.get("target", "")
+
+            if not self.document_oracle:
+                observation["success"] = False
+                observation["error"] = "No document oracle configured"
+                self.log(f"Probe failed: no document oracle")
+            else:
+                # Execute the probe
+                probe_result = self.document_oracle.probe(kind, target)
+                self.supervisor.record_dso_probe(kind, target)
+
+                observation["success"] = probe_result.found
+                observation["probe_kind"] = kind
+                observation["probe_target"] = target
+                observation["probe_found"] = probe_result.found
+                if probe_result.found:
+                    observation["text"] = probe_result.text
+                    observation["section_id"] = probe_result.section_id
+                else:
+                    observation["error"] = probe_result.text  # Error message
+
+                self.log(f"Probe ({kind}, {target}): {'found' if probe_result.found else 'not found'}")
+
+                # Update CCIL with probe observation
+                if self.ccil_config.enabled:
+                    from .ccil import ObservationEvent
+                    probe_obs = ObservationEvent.from_document_probe(
+                        step=self.supervisor.step_count,
+                        kind=kind,
+                        target=target,
+                        found=probe_result.found,
+                        text_length=len(probe_result.text) if probe_result.found else 0,
+                    )
+                    ccil_metrics = self.supervisor.ccil_engine.update(probe_obs)
+                    self.supervisor.last_ccil_metrics = ccil_metrics
+                    if self.verbose:
+                        self.log(f"  [CCIL] cap_opa={ccil_metrics.capability_opa:.3f}, "
+                                f"repair_pressure={ccil_metrics.repair_pressure:.3f}")
+
+                # Check if DSO can be exited
+                can_exit, exit_reason = self.supervisor.can_exit_dso()
+                observation["can_exit_dso"] = can_exit
+                observation["dso_exit_reason"] = exit_reason if can_exit else None
+
+                if can_exit:
+                    self.supervisor.exit_dso(exit_reason)
+                    self.log(f"  DSO exit allowed: {exit_reason}")
+                else:
+                    # Check for exhaustion
+                    if self.document_oracle:
+                        remaining_sections = self.document_oracle.get_remaining_sections()
+                        remaining_keywords = self.document_oracle.get_remaining_keywords()
+                        if not remaining_sections and not remaining_keywords:
+                            self.supervisor.exit_dso("exhausted")
+                            self.log("  DSO exited: all probes exhausted")
+                            observation["dso_exhausted"] = True
+
+        # =========================================================
+        # End DSRO Actions
+        # =========================================================
+
         # EXPERIMENTAL: Update CCIL with observation (if enabled)
         # This is purely diagnostic - does not affect gating
         if self.ccil_config.enabled and self.observer.last_observation:
@@ -447,6 +539,88 @@ class CMBSRunner:
 
         return result
 
+    def _collect_dso_data(self) -> Optional[dict]:
+        """
+        Collect DSO episode data for logging.
+
+        Returns None if DSO was never entered during the run.
+        """
+        dso_mask = self.supervisor.masks.dso
+
+        # Check if DSO was ever entered (look for entry metrics or history)
+        was_entered = (
+            dso_mask.entry_entropy_posture is not None or
+            len(dso_mask.probe_history) > 0 or
+            dso_mask.exit_reason is not None
+        )
+
+        if not was_entered:
+            return None
+
+        # Collect basic episode data
+        episode_data = {
+            "run_id": self.run_id,
+            "dso_entered": True,
+            "dso_active_at_end": dso_mask.active,
+            "exit_reason": dso_mask.exit_reason,
+            "probe_count": len(dso_mask.probe_history),
+            "probe_history": dso_mask.probe_history,
+        }
+
+        # Entry metrics
+        if dso_mask.entry_entropy_posture is not None:
+            episode_data["entry_metrics"] = {
+                "entropy_posture": dso_mask.entry_entropy_posture,
+                "capability_opa": dso_mask.entry_capability_opa,
+                "repair_pressure": dso_mask.entry_repair_pressure,
+            }
+
+        # If we have CCIL enabled, get current metrics for delta calculation
+        if self.ccil_config.enabled and self.supervisor.last_ccil_metrics:
+            current = self.supervisor.last_ccil_metrics
+            episode_data["exit_metrics"] = {
+                "entropy_posture": current.h_posture,
+                "capability_opa": current.capability_opa,
+                "repair_pressure": current.repair_pressure,
+            }
+
+            # Calculate deltas
+            if dso_mask.entry_entropy_posture is not None:
+                episode_data["metric_deltas"] = {
+                    "entropy_posture": dso_mask.entry_entropy_posture - current.h_posture,
+                    "capability_opa": current.capability_opa - dso_mask.entry_capability_opa,
+                    "repair_pressure": dso_mask.entry_repair_pressure - current.repair_pressure,
+                }
+
+        # Document oracle stats
+        if self.document_oracle:
+            episode_data["document_stats"] = {
+                "total_sections": len(self.document_oracle.index.sections),
+                "total_keywords": len(self.document_oracle.index.keyword_index),
+                "sections_probed": len([
+                    p for p in dso_mask.probe_history if p[0] == "open_section"
+                ]),
+                "keywords_probed": len([
+                    p for p in dso_mask.probe_history if p[0] == "search_keyword"
+                ]),
+            }
+
+        # Extract DSO-related trace entries
+        dso_trace = []
+        for entry in self.trace:
+            action = entry.get("agent_step", {}).get("action", {})
+            action_type = action.get("type", "")
+            if action_type in ("document_search", "probe_document"):
+                dso_trace.append({
+                    "step": entry.get("step"),
+                    "action_type": action_type,
+                    "payload": action.get("payload", {}),
+                    "verdict": entry.get("supervisor_response", {}).get("verdict"),
+                })
+        episode_data["dso_trace"] = dso_trace
+
+        return episode_data
+
     def _save_run_logs(self, result: RunResult) -> None:
         """Save trace and result to log directory."""
         # Save trace
@@ -485,6 +659,14 @@ class CMBSRunner:
                     with open(ccil_history_path, "w") as f:
                         json.dump(ccil_history, f, indent=2)
 
+        # DSRO: Save DSO episode data if document oracle was configured
+        if self.document_oracle:
+            dso_data = self._collect_dso_data()
+            if dso_data:
+                dso_path = os.path.join(self.run_log_dir, "dso_episode.json")
+                with open(dso_path, "w") as f:
+                    json.dump(dso_data, f, indent=2)
+
         # Copy artifacts from work_dir to log_dir
         artifacts_dir = os.path.join(self.run_log_dir, "artifacts")
         os.makedirs(artifacts_dir, exist_ok=True)
@@ -510,6 +692,8 @@ class CMBSRunner:
                 self._write_log(f"  - ccil_summary.json: CCIL diachronic audit summary (EXPERIMENTAL)")
                 if self.ccil_config.log_level == "full":
                     self._write_log(f"  - ccil_history.json: CCIL per-step metrics (EXPERIMENTAL)")
+            if self.document_oracle and len(self.supervisor.masks.dso.probe_history) > 0:
+                self._write_log(f"  - dso_episode.json: DSO episode data (DSRO)")
             self.log_file.close()
             self.log_file = None
 

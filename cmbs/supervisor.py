@@ -304,6 +304,49 @@ class Supervisor:
                     "Use read_resource to observe the current policy first."
                 )
 
+        # =========================================================
+        # DSRO: Document Search Obligation Rules
+        # =========================================================
+
+        # Rule DSO-1: Document search can only be chosen during repair
+        if action.type == ActionType.DOCUMENT_SEARCH:
+            if not self.masks.repair_required:
+                return Verdict.BLOCK, (
+                    "Document search is only available as a repair action. "
+                    "No repair obligation is currently pending."
+                )
+            # Entry is allowed - DSO activation happens in runner
+            return Verdict.ALLOW, "Entering Document Search Obligation."
+
+        # Rule DSO-2: While in DSO, only probe_document is allowed
+        if self.masks.dso.active:
+            if action.type != ActionType.PROBE_DOCUMENT:
+                return Verdict.BLOCK, (
+                    f"In Document Search Obligation; only probe_document is allowed. "
+                    f"Received: {action.type.value}"
+                )
+
+        # Rule DSO-3: Non-repetition - block repeated probes
+        if action.type == ActionType.PROBE_DOCUMENT:
+            if not self.masks.dso.active:
+                return Verdict.BLOCK, (
+                    "probe_document is only allowed inside Document Search Obligation. "
+                    "Use document_search to enter DSO first."
+                )
+            kind = action.payload.get("kind", "")
+            target = action.payload.get("target", "")
+            if self.masks.dso.is_probe_repeated(kind, target):
+                return Verdict.BLOCK, (
+                    f"Probe ({kind}, {target}) already performed. "
+                    "Repeated probes are not allowed."
+                )
+            # Probe is allowed - recording happens in runner
+            return Verdict.ALLOW, "Probe allowed."
+
+        # =========================================================
+        # End DSRO Rules
+        # =========================================================
+
         # Rule 1: Posture declaration requires successful evidence
         if action.type == ActionType.DECLARE_POSTURE:
             if self.masks.evidence.state != EvidenceState.SUCCESSFUL:
@@ -426,6 +469,112 @@ class Supervisor:
         if not self.ccil_engine:
             return None
         return self.ccil_engine.get_metrics_history()
+
+    # =========================================================
+    # DSO (Document Search Obligation) Management
+    # =========================================================
+
+    def enter_dso(self) -> bool:
+        """
+        Enter Document Search Obligation state.
+
+        Called by the runner when DOCUMENT_SEARCH action is executed.
+        Records CCIL metrics at entry for later comparison.
+
+        Returns True if DSO was entered, False if CCIL is not enabled.
+        """
+        if not self.ccil_engine or not self.last_ccil_metrics:
+            # Enter DSO even without CCIL, but with default metrics
+            self.masks.dso.enter(
+                entropy_posture=1.0,  # Max uncertainty
+                capability_opa=0.5,   # Neutral
+                repair_pressure=0.5,  # Neutral
+            )
+            return True
+
+        # Enter with current CCIL metrics
+        self.masks.dso.enter(
+            entropy_posture=self.last_ccil_metrics.h_posture,
+            capability_opa=self.last_ccil_metrics.capability_opa,
+            repair_pressure=self.last_ccil_metrics.repair_pressure,
+        )
+        return True
+
+    def record_dso_probe(self, kind: str, target: str) -> None:
+        """Record a probe in DSO history."""
+        self.masks.dso.record_probe(kind, target)
+
+    def can_exit_dso(self) -> tuple[bool, str]:
+        """
+        Check if DSO can be exited based on CCIL metrics.
+
+        Returns (can_exit, reason).
+
+        Exit is allowed if ANY of:
+        - entropy_posture decreased >= threshold
+        - capability_opa increased >= threshold
+        - repair_pressure decreased >= threshold
+        """
+        if not self.masks.dso.active:
+            return True, "not_in_dso"
+
+        if not self.ccil_engine or not self.last_ccil_metrics:
+            # Without CCIL, allow exit after any probe
+            if self.masks.dso.get_probe_count() > 0:
+                return True, "probe_completed"
+            return False, "no_probes"
+
+        # Check belief change using CCIL metrics
+        if self.masks.dso.can_exit_with_belief_change(
+            current_entropy_posture=self.last_ccil_metrics.h_posture,
+            current_capability_opa=self.last_ccil_metrics.capability_opa,
+            current_repair_pressure=self.last_ccil_metrics.repair_pressure,
+        ):
+            return True, "belief_change"
+
+        return False, "insufficient_belief_change"
+
+    def exit_dso(self, reason: str) -> None:
+        """Exit DSO with given reason."""
+        self.masks.dso.exit(reason)
+
+    def is_dso_exhausted(self, available_sections: int, available_keywords: int) -> bool:
+        """
+        Check if all possible probes have been exhausted.
+
+        Args:
+            available_sections: Total number of sections in document
+            available_keywords: Total number of keywords in index
+
+        Returns True if no more probes are possible.
+        """
+        if not self.masks.dso.active:
+            return False
+
+        probed = set(self.masks.dso.probe_history)
+        # A probe is (kind, target), so we need to count unique probes
+        # This is a conservative check - we can't easily know all possible targets
+        # without the oracle, so we rely on the runner to call this with counts
+        total_possible = available_sections + available_keywords
+        return len(probed) >= total_possible
+
+    def get_dso_status(self) -> dict:
+        """Get current DSO status for logging."""
+        status = self.masks.dso.to_dict()
+        if self.masks.dso.active and self.last_ccil_metrics:
+            status["current_metrics"] = {
+                "entropy_posture": self.last_ccil_metrics.h_posture,
+                "capability_opa": self.last_ccil_metrics.capability_opa,
+                "repair_pressure": self.last_ccil_metrics.repair_pressure,
+            }
+            # Compute deltas
+            if self.masks.dso.entry_entropy_posture is not None:
+                status["deltas"] = {
+                    "entropy_posture": self.masks.dso.entry_entropy_posture - self.last_ccil_metrics.h_posture,
+                    "capability_opa": self.last_ccil_metrics.capability_opa - self.masks.dso.entry_capability_opa,
+                    "repair_pressure": self.masks.dso.entry_repair_pressure - self.last_ccil_metrics.repair_pressure,
+                }
+        return status
 
     def __str__(self) -> str:
         return (

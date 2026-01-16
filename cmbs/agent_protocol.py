@@ -46,6 +46,12 @@ class ActionType(str, Enum):
     DECLARE_POSTURE = "declare_posture"
     TERMINATE = "terminate"
 
+    # Document Search (DSRO)
+    # DOCUMENT_SEARCH enters the Document Search Obligation state
+    # PROBE_DOCUMENT performs a lookup within DSO
+    DOCUMENT_SEARCH = "document_search"  # Enter DSO as repair action
+    PROBE_DOCUMENT = "probe_document"    # Probe document within DSO
+
     # Meta
     RETRY = "retry"
     CONTINUE = "continue"
@@ -190,6 +196,14 @@ class AgentStep:
         if self.action.type == ActionType.READ_RESOURCE:
             if "command" not in self.action.payload:
                 return False, "read_resource requires command in payload"
+
+        if self.action.type == ActionType.PROBE_DOCUMENT:
+            if "kind" not in self.action.payload:
+                return False, "probe_document requires kind in payload"
+            if self.action.payload["kind"] not in ("open_section", "search_keyword"):
+                return False, "probe_document kind must be 'open_section' or 'search_keyword'"
+            if "target" not in self.action.payload:
+                return False, "probe_document requires target in payload"
 
         return True, ""
 
