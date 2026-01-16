@@ -199,11 +199,17 @@ class AgentStep:
 
         if self.action.type == ActionType.PROBE_DOCUMENT:
             if "kind" not in self.action.payload:
-                return False, "probe_document requires kind in payload"
+                return False, (
+                    "probe_document requires 'kind' and 'target' in payload. "
+                    "Example: {\"kind\": \"search_keyword\", \"target\": \"clusterpolicy\"}"
+                )
             if self.action.payload["kind"] not in ("open_section", "search_keyword"):
                 return False, "probe_document kind must be 'open_section' or 'search_keyword'"
             if "target" not in self.action.payload:
-                return False, "probe_document requires target in payload"
+                return False, (
+                    "probe_document requires 'target' in payload. "
+                    "Example: {\"kind\": \"open_section\", \"target\": \"hostnetwork\"}"
+                )
 
         return True, ""
 

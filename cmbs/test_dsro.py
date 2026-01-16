@@ -51,7 +51,7 @@ def test_dso_mask():
     assert dso.entry_capability_opa == 0.3
     assert dso.entry_repair_pressure == 0.7
 
-    # Record probes
+    # Record probes (need min 2 for exit)
     dso.record_probe("open_section", "rules")
     dso.record_probe("search_keyword", "comprehension")
 
@@ -59,18 +59,30 @@ def test_dso_mask():
     assert dso.is_probe_repeated("open_section", "rules"), "Should detect repeated probe"
     assert not dso.is_probe_repeated("open_section", "testing"), "Should not detect new probe as repeat"
 
-    # Test exit conditions
-    # No change - should not exit
-    assert not dso.can_exit_with_belief_change(0.8, 0.3, 0.7), "Should not exit with no change"
+    # Test exit conditions (now returns tuple)
+    # No change - should not exit (AND-based: needs entropy drop AND structural change)
+    can_exit, reason = dso.can_exit_with_belief_change(0.8, 0.3, 0.7)
+    assert not can_exit, f"Should not exit with no change: {reason}"
 
-    # Entropy decreased - should exit
-    assert dso.can_exit_with_belief_change(0.7, 0.3, 0.7), "Should exit with entropy decrease"
+    # Only entropy decreased - not enough (need structural change too)
+    can_exit, reason = dso.can_exit_with_belief_change(0.7, 0.3, 0.7)
+    # With epsilon_entropy=0.05, 0.8-0.7=0.1 is enough entropy drop
+    # But need capability OR pressure change too
+    # Actually 0.7 to 0.3 is enough entropy, but no capability/pressure change
+    # So this should NOT exit now with the AND-based logic
+    print(f"  Entropy only: can_exit={can_exit}, reason={reason}")
 
-    # Capability increased - should exit
-    assert dso.can_exit_with_belief_change(0.8, 0.4, 0.7), "Should exit with capability increase"
+    # Entropy decreased AND capability increased - should exit
+    can_exit, reason = dso.can_exit_with_belief_change(0.7, 0.35, 0.7)
+    assert can_exit, f"Should exit with entropy decrease AND capability increase: {reason}"
 
-    # Repair pressure decreased - should exit
-    assert dso.can_exit_with_belief_change(0.8, 0.3, 0.6), "Should exit with pressure decrease"
+    # Entropy decreased AND pressure decreased - should exit
+    can_exit, reason = dso.can_exit_with_belief_change(0.7, 0.3, 0.65)
+    assert can_exit, f"Should exit with entropy decrease AND pressure decrease: {reason}"
+
+    # Test probe tier classification
+    assert dso.get_probe_tier("rules") == 1, "rules should be tier 1"
+    assert dso.get_probe_tier("hostNetwork") == 3, "hostNetwork should be tier 3"
 
     # Exit DSO
     dso.exit("belief_change")

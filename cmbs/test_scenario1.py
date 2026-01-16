@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cmbs.runner import CMBSRunner
 from cmbs.agents.ollama_agent import OllamaAgent
+from cmbs.document_oracle import load_document
 
 
 # Goal from IT-Bench CISO Scenario 1
@@ -149,15 +150,30 @@ def main():
             print("[!] Setup failed. Please check your environment.")
             return 1
 
+    # Load Kyverno documentation for DSRO
+    doc_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "agent-docs", "kyverno_cheat_sheet.txt"
+    )
+    if os.path.exists(doc_path):
+        print(f"\n[*] Loading Kyverno documentation from: {doc_path}")
+        document_oracle = load_document(doc_path)
+        print(f"[+] Loaded {len(document_oracle.get_available_sections())} sections, "
+              f"{len(document_oracle.get_available_keywords())} keywords")
+    else:
+        print(f"\n[!] Warning: Kyverno documentation not found at {doc_path}")
+        document_oracle = None
+
     # Create agent and runner
     print("\n[*] Creating CMBS runner with Ollama agent...")
     agent = OllamaAgent(model="qwen2.5:7b", temperature=0.3)
     runner = CMBSRunner(
         agent=agent,
         work_dir="/tmp/cmbs-scenario1",
-        max_steps=30,
-        timeout_seconds=180.0,
+        max_steps=40,
+        timeout_seconds=300.0,  # 5 minutes for DSRO exploration
         verbose=True,
+        document_oracle=document_oracle,
     )
 
     # Run the scenario

@@ -41,12 +41,17 @@ class ActionPayloadSchema(BaseModel):
     path: Optional[str] = None
     command: Optional[str] = None
     posture: Optional[Literal["compliant", "non_compliant"]] = None
+    # For probe_document
+    kind: Optional[Literal["open_section", "search_keyword"]] = None
+    target: Optional[str] = None
 
 
 class ActionSchema(BaseModel):
     type: Literal[
-        "generate_policy", "revise_artifact", "execute_kubectl",
-        "check_status", "declare_posture", "terminate", "continue"
+        "generate_policy", "generate_script", "revise_artifact",
+        "execute_kubectl", "execute_opa", "execute_script",
+        "check_status", "declare_posture", "terminate", "continue",
+        "document_search", "probe_document"
     ]
     payload: ActionPayloadSchema = Field(default_factory=ActionPayloadSchema)
 
@@ -76,13 +81,28 @@ The JSON must have this exact structure:
 }
 
 Available action types and their required payloads:
-- "generate_policy": {"content": "VALID YAML CONTENT", "path": "policy.yaml"}
-- "revise_artifact": {"content": "FIXED YAML CONTENT", "path": "policy.yaml"} - USE THIS TO FIX ERRORS
-- "execute_kubectl": {"command": "kubectl ..."}
+
+FOR KYVERNO (Kubernetes policies):
+- "generate_policy": {"content": "VALID YAML", "path": "policy.yaml"}
+- "execute_kubectl": {"command": "kubectl apply -f policy.yaml"}
 - "check_status": {"command": "kubectl get policyreport -A -o yaml"}
+
+FOR OPA/REGO (Open Policy Agent):
+- "generate_script": {"content": "BASH SCRIPT", "path": "collect.sh"} - for kubectl data collection
+- "generate_policy": {"content": "REGO CODE", "path": "policy.rego"} - for Rego policies
+- "execute_script": {"command": "bash collect.sh"} - run collection script
+- "execute_opa": {"command": "opa eval --data policy.rego --input data.json 'data.check.result'"} - run OPA
+
+COMMON ACTIONS:
+- "revise_artifact": {"content": "FIXED CONTENT", "path": "filename"} - FIX ERRORS
 - "declare_posture": {"posture": "compliant" OR "non_compliant"}
 - "terminate": {}
 - "continue": {}
+
+DOCUMENT SEARCH (when stuck on syntax errors):
+- "document_search": {} - Enter document search mode to look up syntax
+- "probe_document": {"kind": "open_section", "target": "section-name"} - Read a doc section
+- "probe_document": {"kind": "search_keyword", "target": "keyword"} - Search for keyword
 
 Belief state values:
 - evidence: "none" (nothing done), "attempted" (artifact created), "successful" (execution succeeded)
@@ -91,9 +111,9 @@ Belief state values:
 CRITICAL RULES:
 1. You CANNOT declare posture until evidence is "successful"
 2. You CANNOT terminate until posture is declared and stable
-3. If kubectl apply FAILS, you MUST use "revise_artifact" to fix the YAML before retrying
+3. If execution FAILS, use "revise_artifact" to fix the content before retrying
 4. READ THE ERROR MESSAGE CAREFULLY - it tells you what's wrong
-5. After applying a policy successfully, check policy reports to see violations
+5. If stuck in a loop with the same error, use "document_search" to look up correct syntax
 
 RESPOND WITH ONLY VALID JSON. NO MARKDOWN CODE BLOCKS."""
 
@@ -206,6 +226,30 @@ class OllamaAgent(AgentInterface):
                 if last_obs.get("stdout"):
                     prompt_parts.append(f"  Output: {last_obs['stdout'][:300]}")
 
+                # DSO-specific information
+                if last_obs.get("dso_entered"):
+                    prompt_parts.append(f"\n*** ENTERED DOCUMENT SEARCH MODE ***")
+                    prompt_parts.append(f"You must use 'probe_document' to search documentation.")
+                    prompt_parts.append(f"Use 'open_section' to read a section or 'search_keyword' to find a keyword.")
+                    sections = last_obs.get("available_sections", [])
+                    keywords = last_obs.get("available_keywords", [])
+                    if sections:
+                        prompt_parts.append(f"  Available sections: {', '.join(sections)}")
+                    if keywords:
+                        prompt_parts.append(f"  Sample keywords: {', '.join(keywords[:15])}")
+                    prompt_parts.append(f"  Use SINGLE WORDS for search, not phrases.")
+
+                # Show probe results
+                if last_obs.get("probe_found") is not None:
+                    if last_obs["probe_found"]:
+                        prompt_parts.append(f"\n*** PROBE RESULT (FOUND) ***")
+                        prompt_parts.append(f"  Section: {last_obs.get('section_id', 'unknown')}")
+                        text = last_obs.get("text", "")[:800]
+                        prompt_parts.append(f"  Content:\n{text}")
+                    else:
+                        prompt_parts.append(f"\n*** PROBE RESULT (NOT FOUND) ***")
+                        prompt_parts.append(f"  '{last_obs.get('probe_target')}' not found. Try a different keyword.")
+
         prompt_parts.append("\nRespond with a JSON object containing belief, action, and free_text.")
 
         return "\n".join(prompt_parts)
@@ -299,12 +343,16 @@ class OllamaAgent(AgentInterface):
                 type_mapping = {
                     "generate": ActionType.GENERATE_POLICY,
                     "generate_policy": ActionType.GENERATE_POLICY,
+                    "generate_script": ActionType.GENERATE_SCRIPT,
                     "revise": ActionType.REVISE_ARTIFACT,
                     "revise_artifact": ActionType.REVISE_ARTIFACT,
                     "fix": ActionType.REVISE_ARTIFACT,
                     "execute": ActionType.EXECUTE_KUBECTL,
                     "execute_kubectl": ActionType.EXECUTE_KUBECTL,
                     "kubectl": ActionType.EXECUTE_KUBECTL,
+                    "execute_opa": ActionType.EXECUTE_OPA,
+                    "opa": ActionType.EXECUTE_OPA,
+                    "execute_script": ActionType.EXECUTE_SCRIPT,
                     "check": ActionType.CHECK_STATUS,
                     "check_status": ActionType.CHECK_STATUS,
                     "declare": ActionType.DECLARE_POSTURE,
@@ -312,6 +360,8 @@ class OllamaAgent(AgentInterface):
                     "terminate": ActionType.TERMINATE,
                     "done": ActionType.TERMINATE,
                     "continue": ActionType.CONTINUE,
+                    "document_search": ActionType.DOCUMENT_SEARCH,
+                    "probe_document": ActionType.PROBE_DOCUMENT,
                 }
                 action_type = type_mapping.get(action_type_str.lower(), ActionType.CONTINUE)
 

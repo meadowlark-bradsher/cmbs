@@ -204,11 +204,16 @@ class DSOMask:
     and enforces the non-repetition rule.
 
     Entry: Agent selects DOCUMENT_SEARCH as repair action
-    Exit: CCIL metrics show measurable belief change OR all probes exhausted
+    Exit: CCIL metrics show STRUCTURAL belief change AND minimum probes done
 
     Design invariant:
     "Choosing document search creates an obligation to learn.
      Learning is measured by belief movement, not by claims."
+
+    Probe Tiers (epistemic ordering):
+    - Tier 1: Language primitives (rules, iteration, every, some, if)
+    - Tier 2: Control flow / testing (and, or, with, print, test)
+    - Tier 3: Domain predicates (forbidden when capability is low)
     """
     # Whether DSO is currently active
     active: bool = False
@@ -221,11 +226,28 @@ class DSOMask:
     entry_capability_opa: Optional[float] = None
     entry_repair_pressure: Optional[float] = None
 
-    # Exit thresholds (belief change required to exit)
-    delta_threshold: float = 0.05  # Minimum change in any metric
+    # Exit thresholds - strengthened for structural learning
+    epsilon_entropy: float = 0.05    # Required entropy decrease
+    epsilon_capability: float = 0.03  # Required capability increase
+    epsilon_pressure: float = 0.03    # Required pressure decrease
+
+    # Minimum search depth before exit is allowed
+    # Set to 1 since a single successful probe may provide enough information
+    min_probes_required: int = 1
 
     # Exit reason (set when DSO ends)
     exit_reason: Optional[str] = None  # "belief_change" | "exhausted" | "timeout"
+
+    # Probe tier classification for epistemic ordering
+    TIER_1_LANGUAGE: List[str] = field(default_factory=lambda: [
+        "rules", "iteration", "every", "some", "if", "else",
+        "comprehension", "comprehensions", "default", "not"
+    ])
+    TIER_2_CONTROL: List[str] = field(default_factory=lambda: [
+        "and", "or", "with", "print", "test", "testing", "debugging",
+        "trace", "control-flow", "builtins"
+    ])
+    # Tier 3 is anything not in Tier 1 or 2 (domain predicates)
 
     def enter(
         self,
@@ -258,42 +280,120 @@ class DSOMask:
         """Return number of probes made."""
         return len(self.probe_history)
 
+    def get_probe_tier(self, target: str) -> int:
+        """
+        Classify a probe target into a tier.
+
+        Tier 1: Language primitives (encouraged)
+        Tier 2: Control flow / testing
+        Tier 3: Domain predicates (may be blocked)
+
+        Matching is done on word boundaries to avoid false positives
+        (e.g., "hostNetwork" should not match "test" or "or").
+        """
+        import re
+        target_lower = target.lower()
+
+        # Check for exact match or word-boundary match
+        def matches_tier(keywords):
+            for kw in keywords:
+                # Exact match or the keyword appears as a complete word/segment
+                if target_lower == kw:
+                    return True
+                # Match as a word boundary (e.g., "control-flow" matches "control")
+                if re.search(rf'\b{re.escape(kw)}\b', target_lower):
+                    return True
+                # Match hyphenated section IDs (e.g., "iteration/every" contains "every")
+                if '/' in target_lower and kw in target_lower.split('/'):
+                    return True
+            return False
+
+        if matches_tier(self.TIER_1_LANGUAGE):
+            return 1
+        if matches_tier(self.TIER_2_CONTROL):
+            return 2
+        return 3  # Domain predicate
+
+    def is_probe_allowed(
+        self,
+        target: str,
+        current_entropy: float,
+        current_capability: float,
+    ) -> Tuple[bool, str]:
+        """
+        Check if a probe is allowed based on epistemic ordering.
+
+        When entropy is high and capability is low, Tier-3 probes
+        (domain predicates) are forbidden. Agent must exhaust
+        language-level uncertainty first.
+
+        Returns (allowed, reason).
+        """
+        tier = self.get_probe_tier(target)
+
+        # Always allow Tier 1 and 2
+        if tier <= 2:
+            return True, f"tier_{tier}_allowed"
+
+        # Tier 3: Check if capability is sufficient
+        # High entropy (> 0.8) AND low capability (< 0.4) -> block domain probes
+        if current_entropy > 0.8 and current_capability < 0.4:
+            return False, "tier_3_blocked_low_capability"
+
+        return True, f"tier_{tier}_allowed"
+
     def can_exit_with_belief_change(
         self,
         current_entropy_posture: float,
         current_capability_opa: float,
         current_repair_pressure: float,
-    ) -> bool:
+    ) -> Tuple[bool, str]:
         """
-        Check if CCIL metrics show sufficient change to exit DSO.
+        Check if CCIL metrics show sufficient STRUCTURAL change to exit DSO.
 
-        Exit is allowed if ANY of:
-        - entropy_posture decreased >= delta_threshold
-        - capability_opa increased >= delta_threshold
-        - repair_pressure decreased >= delta_threshold
+        Exit requires ALL of:
+        1. Minimum probe depth reached
+        2. Entropy decreased >= epsilon_entropy
+        3. (Capability increased >= epsilon_capability OR
+            Repair pressure decreased >= epsilon_pressure)
+
+        Returns (can_exit, reason).
         """
         if not self.active:
-            return True  # Not in DSO, can always exit
+            return True, "not_in_dso"
 
         if self.entry_entropy_posture is None:
-            return False  # No entry metrics recorded
+            return False, "no_entry_metrics"
 
-        # Check each exit condition
+        # Check minimum probe depth
+        if len(self.probe_history) < self.min_probes_required:
+            return False, f"insufficient_probes_{len(self.probe_history)}_of_{self.min_probes_required}"
+
+        # Calculate deltas
         entropy_decrease = self.entry_entropy_posture - current_entropy_posture
         capability_increase = current_capability_opa - self.entry_capability_opa
         pressure_decrease = self.entry_repair_pressure - current_repair_pressure
 
-        return (
-            entropy_decrease >= self.delta_threshold or
-            capability_increase >= self.delta_threshold or
-            pressure_decrease >= self.delta_threshold
-        )
+        # Check structural learning condition:
+        # Entropy MUST decrease AND (capability increase OR pressure decrease)
+        entropy_ok = entropy_decrease >= self.epsilon_entropy
+        capability_ok = capability_increase >= self.epsilon_capability
+        pressure_ok = pressure_decrease >= self.epsilon_pressure
+
+        if not entropy_ok:
+            return False, f"entropy_decrease_insufficient_{entropy_decrease:.3f}"
+
+        if not (capability_ok or pressure_ok):
+            return False, f"no_structural_change_cap_{capability_increase:.3f}_pressure_{pressure_decrease:.3f}"
+
+        return True, "structural_belief_change"
 
     def to_dict(self) -> dict:
         return {
             "active": self.active,
             "probe_count": len(self.probe_history),
             "probe_history": self.probe_history,
+            "min_probes_required": self.min_probes_required,
             "entry_metrics": {
                 "entropy_posture": self.entry_entropy_posture,
                 "capability_opa": self.entry_capability_opa,

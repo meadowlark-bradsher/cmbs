@@ -340,6 +340,15 @@ class Supervisor:
                     f"Probe ({kind}, {target}) already performed. "
                     "Repeated probes are not allowed."
                 )
+            # Rule DSO-4: Probe tier ordering - block domain probes when capability is low
+            tier_allowed, tier_reason = self.is_probe_tier_allowed(target)
+            if not tier_allowed:
+                tier = self.masks.dso.get_probe_tier(target)
+                return Verdict.BLOCK, (
+                    f"Probe target '{target}' is Tier-{tier} (domain predicate). "
+                    f"Search language primitives first (rules, iteration, every, some). "
+                    f"Reason: {tier_reason}"
+                )
             # Probe is allowed - recording happens in runner
             return Verdict.ALLOW, "Probe allowed."
 
@@ -510,29 +519,46 @@ class Supervisor:
 
         Returns (can_exit, reason).
 
-        Exit is allowed if ANY of:
-        - entropy_posture decreased >= threshold
-        - capability_opa increased >= threshold
-        - repair_pressure decreased >= threshold
+        Exit requires STRUCTURAL belief change (AND-based):
+        1. Minimum probe depth reached
+        2. Entropy decreased >= epsilon
+        3. (Capability increased OR pressure decreased) >= epsilon
         """
         if not self.masks.dso.active:
             return True, "not_in_dso"
 
         if not self.ccil_engine or not self.last_ccil_metrics:
-            # Without CCIL, allow exit after any probe
-            if self.masks.dso.get_probe_count() > 0:
-                return True, "probe_completed"
-            return False, "no_probes"
+            # Without CCIL, require minimum probes before exit
+            if self.masks.dso.get_probe_count() >= self.masks.dso.min_probes_required:
+                return True, "probe_depth_reached"
+            return False, f"insufficient_probes_{self.masks.dso.get_probe_count()}"
 
-        # Check belief change using CCIL metrics
-        if self.masks.dso.can_exit_with_belief_change(
+        # Check structural belief change using CCIL metrics
+        can_exit, reason = self.masks.dso.can_exit_with_belief_change(
             current_entropy_posture=self.last_ccil_metrics.h_posture,
             current_capability_opa=self.last_ccil_metrics.capability_opa,
             current_repair_pressure=self.last_ccil_metrics.repair_pressure,
-        ):
-            return True, "belief_change"
+        )
+        return can_exit, reason
 
-        return False, "insufficient_belief_change"
+    def is_probe_tier_allowed(self, target: str) -> tuple[bool, str]:
+        """
+        Check if a probe target is allowed based on epistemic ordering.
+
+        When entropy is high and capability is low, domain-specific
+        probes (Tier 3) are blocked to force language-level learning first.
+        """
+        if not self.masks.dso.active:
+            return True, "not_in_dso"
+
+        if not self.last_ccil_metrics:
+            return True, "no_ccil_metrics"
+
+        return self.masks.dso.is_probe_allowed(
+            target=target,
+            current_entropy=self.last_ccil_metrics.h_posture,
+            current_capability=self.last_ccil_metrics.capability_opa,
+        )
 
     def exit_dso(self, reason: str) -> None:
         """Exit DSO with given reason."""
