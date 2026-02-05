@@ -19,6 +19,8 @@ from .belief_server import (
     BeliefSnapshot,
     OntologyBundle,
 )
+from .belief_state import BeliefState
+from .spi import HypothesisProvider, discover_providers
 from .adapters.legacy import (
     LegacyEliminationEvent,
     LegacyReplayAdapter,
@@ -35,6 +37,9 @@ __all__ = [
     "BeliefServer",
     "BeliefSnapshot",
     "OntologyBundle",
+    "BeliefState",
+    "HypothesisProvider",
+    "discover_providers",
     "LegacyEliminationEvent",
     "LegacyReplayAdapter",
     "submit_legacy_elimination",
