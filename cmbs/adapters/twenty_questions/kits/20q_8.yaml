@@ -1,0 +1,35 @@
+hypotheses:
+  - dog
+  - cat
+  - eagle
+  - shark
+  - snake
+  - dolphin
+  - horse
+  - cow
+actions:
+  - id: is_mammal
+    question: "Is it a mammal?"
+    keep:
+      yes: [dog, cat, dolphin, horse, cow]
+      no: [eagle, shark, snake]
+  - id: is_aquatic
+    question: "Does it live in water?"
+    keep:
+      yes: [shark, dolphin]
+      no: [dog, cat, eagle, snake, horse, cow]
+  - id: is_flying
+    question: "Can it fly?"
+    keep:
+      yes: [eagle]
+      no: [dog, cat, shark, snake, dolphin, horse, cow]
+  - id: is_reptile
+    question: "Is it a reptile?"
+    keep:
+      yes: [snake]
+      no: [dog, cat, eagle, shark, dolphin, horse, cow]
+  - id: is_domestic
+    question: "Is it commonly domesticated?"
+    keep:
+      yes: [dog, cat, horse, cow]
+      no: [eagle, shark, snake, dolphin]

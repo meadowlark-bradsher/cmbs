@@ -1,0 +1,39 @@
+hypotheses:
+  - db_connection_exhaustion
+  - replication_lag
+  - disk_full
+  - bad_deploy
+actions:
+  - id: check_replication_lag
+    description: "Check replication lag metric"
+    outcomes: [normal, high]
+  - id: check_disk_usage
+    description: "Check disk usage"
+    outcomes: [ok, full]
+  - id: check_deploy_version
+    description: "Compare deployed version to expected"
+    outcomes: [expected, unexpected]
+  - id: check_db_connections
+    description: "Check database connection saturation"
+    outcomes: [normal, high]
+oracle_table:
+  check_replication_lag:
+    normal:
+      eliminates: [replication_lag]
+    high:
+      eliminates: [db_connection_exhaustion, bad_deploy]
+  check_disk_usage:
+    ok:
+      eliminates: [disk_full]
+    full:
+      eliminates: [replication_lag, bad_deploy]
+  check_deploy_version:
+    expected:
+      eliminates: [bad_deploy]
+    unexpected:
+      eliminates: [replication_lag]
+  check_db_connections:
+    normal:
+      eliminates: [db_connection_exhaustion]
+    high:
+      eliminates: [replication_lag]

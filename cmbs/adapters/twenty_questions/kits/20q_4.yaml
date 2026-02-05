@@ -1,0 +1,21 @@
+hypotheses:
+  - dog
+  - cat
+  - eagle
+  - shark
+actions:
+  - id: is_mammal
+    question: "Is it a mammal?"
+    keep:
+      yes: [dog, cat]
+      no: [eagle, shark]
+  - id: is_aquatic
+    question: "Does it live in water?"
+    keep:
+      yes: [shark]
+      no: [dog, cat, eagle]
+  - id: is_flying
+    question: "Can it fly?"
+    keep:
+      yes: [eagle]
+      no: [dog, cat, shark]
