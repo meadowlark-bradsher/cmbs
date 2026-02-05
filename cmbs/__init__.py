@@ -1,35 +1,41 @@
 """
-CMBS - Constraint-Mask Belief System for IT-Bench CISO
+CMBS v0 Core.
 
-A runtime supervisor that enforces epistemic discipline without supplying
-domain knowledge. The supervisor observes execution outcomes and blocks
-only epistemically invalid transitions (lies and premature exits).
-
-Design principles:
-- Permissive by default
-- No domain knowledge (Kyverno/Rego/Ansible schemas)
-- No hints or suggestions
-- Only blocks: false claims, premature termination
-
-See: CMBS-for-ITBench.md, supervisor.md, mask-inventory.md
+CMBS is a belief-state accounting system. It tracks hypotheses, eliminations,
+entropy, and obligation discipline. It does not select probes, interpret
+observables, or manage workflows. Semantics live in adapters.
 """
 
-from .masks import Masks, AffordanceState, EvidenceState
-from .supervisor import Supervisor, Verdict
-from .agent_protocol import AgentStep, AgentBelief, AgentAction, ActionType
-from .observer import Observer
-from .runner import CMBSRunner
+from .core import (
+    CMBSCore,
+    EliminationEvent,
+    ObligationExitResult,
+    ProbeResult,
+    TerminationResult,
+)
+from .belief_server import (
+    AuditEntry,
+    BeliefServer,
+    BeliefSnapshot,
+    OntologyBundle,
+)
+from .adapters.legacy import (
+    LegacyEliminationEvent,
+    LegacyReplayAdapter,
+    submit_legacy_elimination,
+)
 
 __all__ = [
-    "Masks",
-    "AffordanceState",
-    "EvidenceState",
-    "Supervisor",
-    "Verdict",
-    "AgentStep",
-    "AgentBelief",
-    "AgentAction",
-    "ActionType",
-    "Observer",
-    "CMBSRunner",
+    "CMBSCore",
+    "EliminationEvent",
+    "ObligationExitResult",
+    "ProbeResult",
+    "TerminationResult",
+    "AuditEntry",
+    "BeliefServer",
+    "BeliefSnapshot",
+    "OntologyBundle",
+    "LegacyEliminationEvent",
+    "LegacyReplayAdapter",
+    "submit_legacy_elimination",
 ]
