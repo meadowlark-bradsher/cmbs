@@ -40,6 +40,7 @@ The core does not:
 - Interpret observables, hypotheses, or conclusions
 - Maintain workflow state (capabilities, repairs, affordances)
 - Provide domain-specific thresholds or rules
+- Maintain probabilistic beliefs or confidence scores
 
 All semantics and workflow logic live in adapters.
 

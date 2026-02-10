@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "v0-test-specification.md",
+                "file": "ARCHITECTURE.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "v0-test-specification"
+              "title": "ARCHITECTURE"
             }
           }
         ]
@@ -183,12 +183,17 @@
   },
   "active": "1821816d22c45248",
   "lastOpenFiles": [
+    "BACKLOG.md",
+    "ELIMINATION-STORE-SPI.md",
+    "INVARIANT-TEST-MATRIX.md",
     "BELIEF_SERVER_SPEC.md",
+    "Home.md",
+    "v0-test-specification.md",
+    "Untitled.md",
+    "TC Proof Sketch.md",
     "v0-core-contract-validation.md",
     "v0-implementation-summary.md",
-    "Home.md",
     "ARCHITECTURE.md",
-    "v0-test-specification.md",
     "ARCHIVE.md"
   ]
 }

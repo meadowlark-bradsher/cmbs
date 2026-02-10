@@ -2,12 +2,21 @@
 
 CMBS is a belief-state accounting system. It tracks hypotheses, eliminations, entropy, and obligation discipline using opaque identifiers. The core is domain-agnostic and replay-auditable.
 
+## Why CMBS Exists
+
+Long-horizon agents often carry belief implicitly in prompts, hidden state, or logs, making it hard to enforce invariants, audit trajectories, or replay decisions.
+CMBS externalizes belief as an explicit, monotone state machine:
+hypotheses can only be eliminated, never reintroduced, and every update is recorded in a replayable audit log.
+This allows belief bookkeeping to be separated from policy, learning, and execution.
+
 CMBS does not:
 - Execute or schedule probes
 - Choose actions or control workflows
 - Interpret observables or hypotheses
 
 All semantics live in adapters.
+
+CMBS is designed to be used alongside frozen or learning agents, not embedded within them.
 
 ## Quick Start
 
