@@ -20,7 +20,15 @@ from .belief_server import (
     OntologyBundle,
 )
 from .belief_state import BeliefState
-from .spi import HypothesisProvider, discover_providers
+from .spi import (
+    EliminationProvenance,
+    EliminationResult,
+    EliminationStore,
+    HypothesisProvider,
+    RecoveredState,
+    discover_providers,
+)
+from .stores import InMemoryStore
 from .adapters.legacy import (
     LegacyEliminationEvent,
     LegacyReplayAdapter,
@@ -38,8 +46,13 @@ __all__ = [
     "BeliefSnapshot",
     "OntologyBundle",
     "BeliefState",
+    "EliminationProvenance",
+    "EliminationResult",
+    "EliminationStore",
     "HypothesisProvider",
+    "RecoveredState",
     "discover_providers",
+    "InMemoryStore",
     "LegacyEliminationEvent",
     "LegacyReplayAdapter",
     "submit_legacy_elimination",

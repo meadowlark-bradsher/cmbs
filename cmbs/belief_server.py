@@ -12,10 +12,15 @@ import math
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from .core import CMBSCore
 from .belief_state import BeliefState
+from .spi.elimination_store import (
+    EliminationProvenance,
+    EliminationStore,
+    RecoveredState,
+)
 from .spi.hypothesis_provider import HypothesisProvider
 
 
@@ -126,10 +131,12 @@ class BeliefServer:
         self,
         validate_hypotheses: bool = False,
         belief_provider: Optional[HypothesisProvider] = None,
+        store: Optional[EliminationStore] = None,
     ) -> None:
         self._sessions: Dict[str, SessionState] = {}
         self._validate_hypotheses = validate_hypotheses
         self._belief_provider = belief_provider
+        self._store = store
 
     def declare_session(
         self,
@@ -163,6 +170,11 @@ class BeliefServer:
                 belief_state=None,
                 hypothesis_ids=set(hypotheses),
             )
+            if self._store is not None:
+                self._store.create_session(
+                    session_id=session_id,
+                    hypothesis_ids=frozenset(state.hypothesis_ids),
+                )
         self._sessions[session_id] = state
         declared_hypotheses = sorted(state.hypothesis_ids)
         payload = {
@@ -237,6 +249,17 @@ class BeliefServer:
             observable_id=observable_id,
             eliminated=set(eliminated),
         )
+        if self._store is not None:
+            result = self._store.eliminate(
+                session_id=session_id,
+                eliminated=set(eliminated),
+                provenance=EliminationProvenance(
+                    source_id=source_id,
+                    trigger=observation_id,
+                ),
+            )
+            applied = sorted(result.applied)
+            ignored = sorted(set(eliminated) - set(result.applied))
         after = set(self._survivors(state))
 
         payload = {
@@ -259,6 +282,84 @@ class BeliefServer:
             audit_event_id=event_id,
         )
         return applied, ignored, self._snapshot(state), event_id
+
+    def restore_session(
+        self,
+        session_id: str,
+        recovered: RecoveredState,
+        audit_events: Iterable[AuditEntry],
+    ) -> None:
+        if session_id in self._sessions:
+            raise BeliefServerError(
+                code="CONFLICT",
+                message="Session already exists.",
+                details={"session_id": session_id},
+            )
+        events = list(audit_events)
+        if not events:
+            raise BeliefServerError(
+                code="INVALID_REQUEST",
+                message="Audit events are required for restore.",
+            )
+        declare = next((entry for entry in events if entry.verb == "DECLARE_SESSION"), None)
+        if declare is None:
+            raise BeliefServerError(
+                code="INVALID_REQUEST",
+                message="DECLARE_SESSION audit entry is required for restore.",
+            )
+        ontology_payload = declare.payload.get("ontology", {})
+        try:
+            ontology = OntologyBundle(
+                hypothesis_space_id=ontology_payload["hypothesis_space_id"],
+                hypothesis_version=ontology_payload["hypothesis_version"],
+                causal_graph_ref=ontology_payload["causal_graph_ref"],
+                causal_graph_version=ontology_payload["causal_graph_version"],
+            )
+        except KeyError as exc:
+            raise BeliefServerError(
+                code="INVALID_REQUEST",
+                message="DECLARE_SESSION missing ontology fields.",
+                details={"missing": str(exc)},
+            ) from exc
+
+        declared = set(declare.payload.get("hypotheses", []))
+        if declared and declared != set(recovered.hypothesis_ids):
+            raise BeliefServerError(
+                code="CONFLICT",
+                message="Recovered hypotheses do not match audit declaration.",
+                details={
+                    "declared": sorted(declared),
+                    "recovered": sorted(recovered.hypothesis_ids),
+                },
+            )
+
+        kernel = CMBSCore(set(recovered.hypothesis_ids))
+        state = SessionState(
+            session_id=session_id,
+            ontology=ontology,
+            kernel=kernel,
+            belief_state=None,
+            hypothesis_ids=set(recovered.hypothesis_ids),
+        )
+
+        for entry in events:
+            self._replay_audit_entry(state, entry)
+
+        if set(kernel.survivors) != set(recovered.survivors):
+            raise BeliefServerError(
+                code="CONFLICT",
+                message="Recovered survivors do not match replayed state.",
+                details={
+                    "recovered": sorted(recovered.survivors),
+                    "replayed": sorted(kernel.survivors),
+                },
+            )
+
+        state.audit = list(events)
+        last_entry = state.audit[-1]
+        state.audit_head_event_id = last_entry.event_id
+        state.audit_head_hash = last_entry.survivors_after_hash
+        self._sessions[session_id] = state
 
     def apply_probe(
         self,
@@ -511,6 +612,99 @@ class BeliefServer:
         state.audit_head_event_id = event_id
         state.audit_head_hash = after_hash
         return event_id
+
+    def _replay_audit_entry(self, state: SessionState, entry: AuditEntry) -> None:
+        if entry.verb == "DECLARE_SESSION":
+            return
+        if entry.verb == "ELIMINATE":
+            payload = entry.payload
+            source_id = payload.get("source_id", "")
+            observation_id = payload.get("observation_id", "")
+            eliminated = set(payload.get("eliminated", []))
+            if state.kernel is None:
+                raise BeliefServerError(
+                    code="CONFLICT",
+                    message="Belief kernel unavailable during replay.",
+                )
+            result = state.kernel.submit_probe_result(
+                probe_id=f"{source_id}::{observation_id}",
+                observable_id=source_id,
+                eliminated=eliminated,
+            )
+            if not result.accepted:
+                raise BeliefServerError(
+                    code="CONFLICT",
+                    message="Duplicate probe detected during replay.",
+                    details={"observation_id": observation_id, "source_id": source_id},
+                )
+            applied = set(entry.delta.get("eliminated", []))
+            ignored = sorted(eliminated - applied)
+            observation_key = f"{source_id}::{observation_id}"
+            state.observation_index[observation_key] = ObservationRecord(
+                applied_eliminated=sorted(applied),
+                ignored_eliminated=ignored,
+                audit_event_id=entry.event_id,
+            )
+            return
+        if entry.verb == "APPLY_PROBE":
+            raise BeliefServerError(
+                code="CONFLICT",
+                message="apply_probe entries are not supported in restore for kernel sessions.",
+            )
+        if entry.verb == "ENTER_OBLIGATION":
+            payload = entry.payload
+            obligation_id = payload.get("obligation_id", "")
+            min_total_eliminations = int(payload.get("min_total_eliminations", 0))
+            if state.kernel is None:
+                raise BeliefServerError(
+                    code="CONFLICT",
+                    message="Belief kernel unavailable during replay.",
+                )
+            state.kernel.enter_obligation(
+                obligation_id=obligation_id,
+                min_eliminations=min_total_eliminations,
+            )
+            state.active_obligation_id = obligation_id
+            return
+        if entry.verb == "REQUEST_EXIT":
+            payload = entry.payload
+            obligation_id = payload.get("obligation_id", "")
+            approved = bool(payload.get("approved"))
+            if state.kernel is None:
+                raise BeliefServerError(
+                    code="CONFLICT",
+                    message="Belief kernel unavailable during replay.",
+                )
+            result = state.kernel.request_obligation_exit(obligation_id=obligation_id)
+            if approved != result.permitted:
+                raise BeliefServerError(
+                    code="CONFLICT",
+                    message="Obligation exit replay mismatch.",
+                    details={
+                        "obligation_id": obligation_id,
+                        "approved": approved,
+                        "permitted": result.permitted,
+                    },
+                )
+            if approved:
+                state.active_obligation_id = None
+            return
+        if entry.verb == "DECLARE_CONCLUSION":
+            payload = entry.payload
+            if payload.get("accepted"):
+                conclusion_id = payload.get("conclusion_id", "")
+                if state.kernel is None:
+                    raise BeliefServerError(
+                        code="CONFLICT",
+                        message="Belief kernel unavailable during replay.",
+                    )
+                state.kernel.declare_conclusion(conclusion_id=conclusion_id)
+            return
+        if entry.verb == "REQUEST_TERMINATION":
+            payload = entry.payload
+            if payload.get("approved"):
+                state.terminated = True
+            return
 
     def _survivors(self, state: SessionState) -> Set[str]:
         if state.belief_state is not None:
