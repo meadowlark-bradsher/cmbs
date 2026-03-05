@@ -20,6 +20,8 @@ from .belief_server import (
     OntologyBundle,
 )
 from .belief_state import BeliefState
+from .op_models import OperationSpec, OperationEnvelope, BranchRecord, SessionRecord
+from .oplog_server import OplogServer, OplogServerError, OpAppendResult
 from .spi import (
     EliminationProvenance,
     EliminationResult,
@@ -46,6 +48,13 @@ __all__ = [
     "BeliefSnapshot",
     "OntologyBundle",
     "BeliefState",
+    "OperationSpec",
+    "OperationEnvelope",
+    "BranchRecord",
+    "SessionRecord",
+    "OplogServer",
+    "OplogServerError",
+    "OpAppendResult",
     "EliminationProvenance",
     "EliminationResult",
     "EliminationStore",

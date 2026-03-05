@@ -1,7 +1,7 @@
 """
 CMBS v0 Core Test Suite
 
-Generated from: cmbs-docs/v0-test-specification.md
+Generated from: docs-vault/v0-test-specification.md
 Date: 2026-02-02
 
 All tests use opaque identifiers and avoid domain semantics.

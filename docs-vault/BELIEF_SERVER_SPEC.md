@@ -563,3 +563,30 @@ That’s the “Belief Server” claim, fully supported.
 * `api/openapi.yaml` (optional next, but easy)
 * `tests/test_invariants.py`
 * `examples/replay_demo.py`
+
+---
+
+## 9. V2 Operator-Log Extension (Transcript-Conditioned State)
+
+CMBS v2 adds an operator-log surface while keeping `/v1` behavior unchanged.
+
+State definition:
+
+`State = reduce(reducer_version, op_log_prefix(branch, seq))`
+
+Primary `/v2` endpoints:
+
+- `POST /v2/sessions`
+- `POST /v2/sessions/{sid}/ops`
+- `POST /v2/sessions/{sid}/branches`
+- `GET /v2/sessions/{sid}/ops`
+- `GET /v2/sessions/{sid}/state`
+- `POST /v2/analysis/commute`
+- `POST /v2/analysis/replay`
+- `POST /v2/merge`
+
+Phase-1 merge contract:
+
+- Supported policy: `refuse_non_commutative`
+- On order-sensitive conflicts: `409 NON_COMMUTATIVE_CONFLICT`
+- Conflict response includes witness with both order hashes and a projection diff summary.

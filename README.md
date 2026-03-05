@@ -54,8 +54,11 @@ adapter.submit_elimination_event(
 
 ## Docs
 
-- `docs/ARCHITECTURE.md`
-- `docs/v0-test-specification.md`
-- `docs/v0-implementation-summary.md`
-- `docs/v0-core-contract-validation.md`
-- `docs/ARCHIVE.md`
+- [Markdown Index](MARKDOWN_INDEX.md) - single entry point for all Markdown in this repo
+- [Docs Site Home](docs-site/index.md) - MkDocs landing page
+- [Repository Structure](docs-site/REPOSITORY_STRUCTURE.md) - package and folder map
+- [CMBS Architecture](docs-vault/ARCHITECTURE.md)
+- [v0 Test Specification](docs-vault/v0-test-specification.md)
+- [v0 Implementation Summary](docs-vault/v0-implementation-summary.md)
+- [v0 Core Contract Validation](docs-vault/v0-core-contract-validation.md)
+- [Legacy Archive Notes](docs-vault/ARCHIVE.md)

@@ -19,7 +19,7 @@ CMBS v0 Core is a domain-agnostic belief-state accounting system. It tracks hypo
 
 ## Implementation Approach
 
-The implementation followed a test-first, phased approach using the authoritative test specification (`docs/v0-test-specification.md`). Each phase targeted specific invariants and made only the minimal changes required to pass those tests.
+The implementation followed a test-first, phased approach using the authoritative test specification (`docs-vault/v0-test-specification.md`). Each phase targeted specific invariants and made only the minimal changes required to pass those tests.
 
 | Phase | Target | Tests |
 |-------|--------|-------|
@@ -184,8 +184,8 @@ _elimination_history: List[EliminationEvent]   # Audit trail
 |------|---------|
 | `cmbs/core.py` | Core implementation (~180 lines) |
 | `tests/test_v0_core.py` | Test suite (49 tests) |
-| `docs/v0-test-specification.md` | Authoritative test specification |
-| `docs/v0-core-contract-validation.md` | Contract validation and invariant analysis |
+| `docs-vault/v0-test-specification.md` | Authoritative test specification |
+| `docs-vault/v0-core-contract-validation.md` | Contract validation and invariant analysis |
 
 ---
 

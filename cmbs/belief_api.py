@@ -1,17 +1,18 @@
-"""
-FastAPI transport for Belief Server v1 (in-memory).
-"""
+"""FastAPI transport for Belief Server v1 and operator-log v2."""
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from .belief_server import BeliefServer, BeliefServerError, OntologyBundle
+from .op_models import OperationSpec
+from .oplog_server import OplogServer, OplogServerError
 
-app = FastAPI(title="Belief Server v1")
+app = FastAPI(title="Belief Server")
 server = BeliefServer()
+v2_server = OplogServer()
 
 
 class OntologyBundleModel(BaseModel):
@@ -53,6 +54,72 @@ class RequestTerminationRequest(BaseModel):
     context: Optional[Dict[str, Any]] = None
 
 
+class V2CreateSessionRequest(BaseModel):
+    ontology: Dict[str, Any]
+    initial_hypotheses: List[str]
+    default_reducer: str = "v1_mask_meet_tombstone"
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class OpSpecModel(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    op_id: Optional[str] = None
+    op_type: str = Field(alias="type")
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    source_id: str
+    preconditions: List[str] = Field(default_factory=list)
+    commutativity_key: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+
+class V2AppendOpRequest(BaseModel):
+    op_id: Optional[str] = None
+    op_type: str = Field(alias="type")
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    source_id: str
+    preconditions: List[str] = Field(default_factory=list)
+    commutativity_key: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+
+class V2BranchRequest(BaseModel):
+    from_branch: str
+    from_seq: int
+    name: str
+    note: Optional[str] = None
+
+
+class V2CommutativityRequest(BaseModel):
+    sid: str
+    branch: str = "main"
+    seq: int
+    reducer: str
+    op_a: OpSpecModel
+    op_b: OpSpecModel
+
+
+class V2ReplayRequest(BaseModel):
+    sid: str
+    branch: str = "main"
+    from_seq: Optional[int] = Field(default=None, alias="from")
+    to_seq: Optional[int] = Field(default=None, alias="to")
+    reducers: List[str]
+
+
+class V2BranchRef(BaseModel):
+    branch: str
+    seq: int
+
+
+class V2MergeRequest(BaseModel):
+    sid: str
+    base: V2BranchRef
+    heads: List[V2BranchRef]
+    policy: str
+    reducer: str
+
+
 ERROR_STATUS = {
     "SESSION_NOT_FOUND": 404,
     "OBLIGATION_NOT_FOUND": 404,
@@ -67,6 +134,20 @@ async def _belief_error_handler(_, exc: BeliefServerError):
     status = ERROR_STATUS.get(exc.code, 400)
     return JSONResponse(
         status_code=status,
+        content={
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            }
+        },
+    )
+
+
+@app.exception_handler(OplogServerError)
+async def _oplog_error_handler(_, exc: OplogServerError):
+    return JSONResponse(
+        status_code=exc.status_code,
         content={
             "error": {
                 "code": exc.code,
@@ -174,3 +255,123 @@ def request_termination(session_id: str, req: RequestTerminationRequest):
         "snapshot": snapshot.to_dict(),
         "audit_event_id": event_id,
     }
+
+
+@app.post("/v2/sessions")
+def v2_create_session(req: V2CreateSessionRequest):
+    return v2_server.create_session(
+        ontology=req.ontology,
+        initial_hypotheses=req.initial_hypotheses,
+        default_reducer=req.default_reducer,
+        metadata=req.metadata,
+    )
+
+
+@app.post("/v2/sessions/{sid}/ops")
+def v2_append_op(sid: str, req: V2AppendOpRequest, branch: str = "main"):
+    result = v2_server.append_op(
+        sid=sid,
+        branch_id=branch,
+        spec=OperationSpec(
+            op_id=req.op_id,
+            op_type=req.op_type,
+            payload=req.payload,
+            source_id=req.source_id,
+            preconditions=req.preconditions,
+            commutativity_key=req.commutativity_key,
+            idempotency_key=req.idempotency_key,
+        ),
+    )
+    return result.to_dict()
+
+
+@app.post("/v2/sessions/{sid}/branches")
+def v2_create_branch(sid: str, req: V2BranchRequest):
+    return v2_server.create_branch(
+        sid=sid,
+        from_branch=req.from_branch,
+        from_seq=req.from_seq,
+        name=req.name,
+        note=req.note,
+    )
+
+
+@app.get("/v2/sessions/{sid}/ops")
+def v2_get_ops(
+    sid: str,
+    branch: str = "main",
+    from_seq: Optional[int] = Query(default=None, alias="from"),
+    to_seq: Optional[int] = Query(default=None, alias="to"),
+):
+    return v2_server.get_ops(
+        sid=sid,
+        branch=branch,
+        from_seq=from_seq,
+        to_seq=to_seq,
+    )
+
+
+@app.get("/v2/sessions/{sid}/state")
+def v2_get_state(
+    sid: str,
+    branch: str = "main",
+    at: Optional[int] = None,
+    reducer: Optional[str] = None,
+):
+    return v2_server.get_state(
+        sid=sid,
+        branch=branch,
+        at=at,
+        reducer=reducer,
+    )
+
+
+@app.post("/v2/analysis/commute")
+def v2_analysis_commute(req: V2CommutativityRequest):
+    return v2_server.analyze_commute(
+        sid=req.sid,
+        branch=req.branch,
+        seq=req.seq,
+        reducer=req.reducer,
+        op_a=OperationSpec(
+            op_id=req.op_a.op_id,
+            op_type=req.op_a.op_type,
+            payload=req.op_a.payload,
+            source_id=req.op_a.source_id,
+            preconditions=req.op_a.preconditions,
+            commutativity_key=req.op_a.commutativity_key,
+            idempotency_key=req.op_a.idempotency_key,
+        ),
+        op_b=OperationSpec(
+            op_id=req.op_b.op_id,
+            op_type=req.op_b.op_type,
+            payload=req.op_b.payload,
+            source_id=req.op_b.source_id,
+            preconditions=req.op_b.preconditions,
+            commutativity_key=req.op_b.commutativity_key,
+            idempotency_key=req.op_b.idempotency_key,
+        ),
+    )
+
+
+@app.post("/v2/analysis/replay")
+def v2_analysis_replay(req: V2ReplayRequest):
+    return v2_server.analyze_replay(
+        sid=req.sid,
+        branch=req.branch,
+        from_seq=req.from_seq,
+        to_seq=req.to_seq,
+        reducers=req.reducers,
+    )
+
+
+@app.post("/v2/merge")
+def v2_merge(req: V2MergeRequest):
+    return v2_server.merge(
+        sid=req.sid,
+        base_branch=req.base.branch,
+        base_seq=req.base.seq,
+        heads=[{"branch": h.branch, "seq": h.seq} for h in req.heads],
+        policy=req.policy,
+        reducer=req.reducer,
+    )

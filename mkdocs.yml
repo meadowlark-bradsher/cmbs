@@ -1,0 +1,11 @@
+site_name: CMBS
+site_description: Constraint-Mask Belief System documentation
+docs_dir: docs-site
+theme:
+  name: mkdocs
+nav:
+  - Home: index.md
+  - Repository Structure: REPOSITORY_STRUCTURE.md
+markdown_extensions:
+  - toc:
+      permalink: true

@@ -50,3 +50,17 @@ All semantics and workflow logic live in adapters.
 - [[v0-implementation-summary]]
 - [[v0-core-contract-validation]]
 - [[ARCHIVE]]
+
+## V2 Transcript-Conditioned Mode
+
+CMBS v2 introduces a first-class operator log where state is always derived from
+an ordered prefix and reducer version:
+
+`State = reduce(reducer_version, op_log_prefix(branch, seq))`
+
+Implications:
+
+- Order-sensitive updates are explicit rather than hidden.
+- Branching is used to explore alternate op orders.
+- Merge defaults to conflicting with witness (`409 NON_COMMUTATIVE_CONFLICT`)
+  when order changes outcomes under the chosen reducer.
